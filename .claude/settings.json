@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(*)",
+      "View(*)",
+      "Edit(*)",
+      "Write(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "Bash(cd *)",
+      "Bash(ls *)",
+      "Bash(pwd *)",
+      "Bash(mkdir *)",
+      "Bash(touch *)",
+      "Bash(git *)",
+      "Bash(npm *)",
+      "Bash(cargo *)",
+      "Bash(rustc *)",
+      "Bash(rustup *)",
+      "PowerShell(*)"
+    ],
+    "ask": [
+      "PowerShell(Remove-Item *)",
+      "PowerShell(rm *)",
+      "PowerShell(del *)",
+      "Bash(cargo publish)",
+      "PowerShell(cargo publish)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "PowerShell(Remove-Item -Force *)",
+      "PowerShell(Remove-Item -Recurse -Force *)"
+    ]
+  }
+}

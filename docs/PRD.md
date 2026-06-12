@@ -28,13 +28,13 @@
 
 ### 文档中使用的标记说明
 
-| 标记 | 含义 |
-|------|------|
-| 🤖 **Agent 任务** | 需要 AI Agent 直接执行的开发任务 |
-| ⚠️ **避坑提示** | 已知的技术难点或容易出错的地方，Agent 应特别注意 |
-| 🛑 **Agent 检查点** | Agent 必须在此处停下来自检并汇报结果 |
-| 🔧 **人工操作** | 需要人工完成的操作（如申请 API Key、下载模型等） |
-| 📦 **依赖项** | 需要添加到 `Cargo.toml` 的 crate |
+| 标记               | 含义                           |
+|------------------|------------------------------|
+| 🤖 **Agent 任务**  | 需要 AI Agent 直接执行的开发任务        |
+| ⚠️ **避坑提示**      | 已知的技术难点或容易出错的地方，Agent 应特别注意  |
+| 🛑 **Agent 检查点** | Agent 必须在此处停下来自检并汇报结果        |
+| 🔧 **人工操作**      | 需要人工完成的操作（如申请 API Key、下载模型等） |
+| 📦 **依赖项**       | 需要添加到 `Cargo.toml` 的 crate   |
 
 ---
 
@@ -60,7 +60,8 @@
 
 ### 1.1 项目背景
 
-在日常使用大语言模型（LLM）时，复杂的提示词（Prompt）往往需要耗费大量的键盘输入与修改时间。**VoxInk** 是一款专为大模型高频使用者设计的开源、轻量级桌面语音提示词辅助工具，帮助用户将脑海中的灵感快速"落笔成墨"，无缝输出至大模型对话框中。
+在日常使用大语言模型（LLM）时，复杂的提示词（Prompt）往往需要耗费大量的键盘输入与修改时间。**VoxInk**
+是一款专为大模型高频使用者设计的开源、轻量级桌面语音提示词辅助工具，帮助用户将脑海中的灵感快速"落笔成墨"，无缝输出至大模型对话框中。
 
 ### 1.2 产品定位
 
@@ -70,35 +71,38 @@
 
 ### 1.3 核心设计原则
 
-| 原则 | 说明 |
-|------|------|
-| **轻量优先** | 极低的系统资源占用（内存 < 100MB 空闲），启动迅速（< 1s） |
-| **隐私优先** | 敏感数据（API Key）本地加密存储；支持纯本地 ASR，音频不上传云端 |
-| **插件化可扩展** | ASR 后端采用 trait 抽象，支持多种 ASR 服务商及本地引擎自由切换 |
-| **渐进式体验** | 默认开箱即用，高级功能通过设置逐步发现，降低初次使用门槛 |
-| **跨平台一致** | Windows / macOS / Linux 三平台核心体验一致，平台差异妥善处理 |
+| 原则         | 说明                                         |
+|------------|--------------------------------------------|
+| **轻量优先**   | 极低的系统资源占用（内存 < 100MB 空闲），启动迅速（< 1s）        |
+| **隐私优先**   | 敏感数据（API Key）本地加密存储；支持纯本地 ASR，音频不上传云端      |
+| **插件化可扩展** | ASR 后端采用 trait 抽象，支持多种 ASR 服务商及本地引擎自由切换    |
+| **渐进式体验**  | 默认开箱即用，高级功能通过设置逐步发现，降低初次使用门槛               |
+| **跨平台一致**  | Windows / macOS / Linux 三平台核心体验一致，平台差异妥善处理 |
 
 ### 1.4 核心技术栈
 
-| 层级 | 技术选型 | 版本要求 | 说明 |
-|------|---------|---------|------|
-| **GUI 框架** | GPUI (Zed 团队) | latest git | GPU 加速的高性能 Rust UI 框架 |
-| **核心语言** | Rust | Edition 2024, MSRV 1.80+ | 零成本抽象、内存安全、高性能 |
-| **音频采集** | `cpal` | 0.15+ | 跨平台音频 I/O 库 |
-| **音频处理** | `hound` / `rubato` | 3.5+ / 0.15+ | WAV 文件读写 + 高质量音频重采样 |
-| **异步运行时** | `tokio` | 1.x (multi-threaded) | 异步 I/O、并发任务调度 |
-| **HTTP 客户端** | `reqwest` | 0.12+ | 异步 HTTP 请求，TLS 支持 |
-| **WebSocket** | `tokio-tungstenite` | 0.24+ | 异步 WebSocket（实时 ASR） |
-| **系统托盘** | `tray-icon` | 0.19+ | 跨平台托盘图标 |
-| **开机自启** | `auto-launch` | 0.6+ | 跨平台自启动管理 |
-| **剪贴板** | `arboard` | 3.4+ | 跨平台系统剪贴板访问 |
-| **配置存储** | `serde` + `serde_json` + `directories` | 1.x / 1.x / 6+ | 类型安全的 JSON 配置持久化 |
-| **加密存储** | `ring` 或 `aead` | 0.17+ | API Key 等敏感字段的 AES-256-GCM 加密 |
-| **本地 ASR** | `qwen-asr` | latest git | CPU-only、纯 Rust 实现的 Qwen3-ASR 本地语音识别引擎 |
-| **日志** | `tracing` + `tracing-subscriber` | 0.1+ / 0.3+ | 结构化日志，支持文件持久化 |
-| **UI 组件** | `gpui-component` | latest git | GPUI 生态组件库 |
-| **数据库** | `rusqlite` (bundled feature) | 0.31+ | SQLite 绑定用于历史记录 |
-| **日期时间** | `chrono` | 0.4+ | 时间戳处理 |
+| 层级 / 领域        | 推荐技术选型                           | 版本要求                     | 选型理由与说明 (2026年视角)                          |
+|:---------------|:---------------------------------|:-------------------------|:-------------------------------------------|
+| **GUI 渲染框架**   | `gpui`                           | latest git               | Zed 团队的高性能 UI 框架，GPU 级渲染，极速冷启动             |
+| **UI 组件**      | `gpui-component`                 | latest git               | GPUI 生态组件库                                 |
+| **基础语言与环境**    | Rust                             | Edition 2024, MSRV 1.85+ | 现代 Rust 语法，开启最新特性                          |
+| **异步与并发**      | `tokio`                          | 1.x (multi-thread)       | 事实标准的异步运行时，调度网络与耗时任务                       |
+| **音频采集控制**     | `cpal`                           | **0.17+**                | 跨平台音频底层访问，无缝获取麦克风流                         |
+| **音频处理管线**     | `hound` + `rubato`               | 3.5+ / **3.0+**          | WAV 读写与高质量 Sinc 音频重采样，满足 ASR 严格采样率要求       |
+| **无锁环形缓冲**     | `ringbuf`                        | 0.4+                     | 解决音频极速回调线程与 Tokio 工作线程的无锁数据传递              |
+| **静音检测 (VAD)** | `webrtc-vad`                     | 0.4+                     | 极低 CPU 占用的端点检测，实现自动停止录音 (可选)               |
+| **网络层通讯**      | `reqwest` + `tokio-tungstenite`  | **0.13+** / **0.28+**    | 支持 HTTP/3 和 WebSocket，负责与云端 ASR 稳定流式交互     |
+| **系统托盘集成**     | `tray-icon`                      | **0.24+**                | Tauri 团队维护的跨平台托盘，兼容性极佳                     |
+| **全局快捷键**      | `global-hotkey`                  | **0.8+**                 | Tauri 团队维护，稳定接管跨平台系统级热键                    |
+| **剪贴板控制**      | `arboard`                        | 3.4+                     | 支持全平台的剪贴板读写                                |
+| **应用自启动**      | `auto-launch`                    | 0.6+                     | 管理注册表/LaunchAgent 实现开机自启                   |
+| **配置存储**       | `serde` + `toml` + `directories` | 1.x / 0.8+ / 6+          | 抛弃 JSON，使用带注释、可读性更高的 TOML 持久化用户配置          |
+| **安全与加密**      | `aes-gcm` + `hkdf`               | **0.10+ / 0.12+**        | **纯 Rust 实现**的 API Key 加密，彻底摆脱 C 编译链，跨平台无痛 |
+| **本地 ASR**     | `qwen-asr`                       | latest git               | CPU-only、纯 Rust 实现的 Qwen3-ASR 本地语音识别引擎     |
+| **本地历史数据库**    | `rusqlite`                       | 0.31+                    | 开启 `bundled` feature，支持 FTS5 全文检索历史录音文本    |
+| **错误处理规范**     | `thiserror` + `anyhow`           | 2.x / 1.x                | `thiserror` 处理模块级强类型错误，`anyhow` 处理顶层业务传播   |
+| **多语言本地化**     | `rust-i18n`                      | 3.x                      | 编译期嵌入多语言词典，极简优雅                            |
+| **日期时间**       | `chrono`                         | 0.4+                     | 时间戳处理                                      |
 
 ---
 
@@ -201,7 +205,8 @@ Microphone ──[PCM]──▶ Audio Capture ──[f32 samples]──▶ Ring 
 
 ⚠️ **关键约束（Agent 必须遵守）**：
 
-1. 音频采集线程使用 `cpal` 的专用 I/O 回调，**必须**是非阻塞的。回调中**仅做**数据拷贝到环形缓冲区（`ringbuf`），**不做任何重采样、网络操作或文件 I/O**
+1. 音频采集线程使用 `cpal` 的专用 I/O 回调，**必须**是非阻塞的。回调中**仅做**数据拷贝到环形缓冲区（`ringbuf`），*
+   *不做任何重采样、网络操作或文件 I/O**
 2. 所有耗时操作（重采样、编码、网络发送、本地推理）在 Tokio 工作线程中执行
 3. UI 更新统一通过 `cx.spawn()` 或单消费者 MPSC Channel 投递回主线程
 4. 任何情况下都不能在 GPUI 主线程上调用 `.await`（会导致死锁）
@@ -241,9 +246,9 @@ Microphone ──[PCM]──▶ Audio Capture ──[f32 samples]──▶ Ring 
 #### 3.1.3 录音状态反馈
 
 - **视觉反馈**：
-  - 录音按钮变红，外圈脉冲动画（`pulsing red ring`）
-  - 状态栏显示实时录音时长格式 `MM:SS`
-  - 任务栏/托盘图标叠加录音中标识（红色圆点）
+    - 录音按钮变红，外圈脉冲动画（`pulsing red ring`）
+    - 状态栏显示实时录音时长格式 `MM:SS`
+    - 任务栏/托盘图标叠加录音中标识（红色圆点）
 - **音频电平指示**（v1.1+）：实时显示麦克风输入音量电平条，帮助用户确认麦克风工作正常。
 
 ### 3.2 语音转录模式
@@ -261,67 +266,68 @@ VoxInk 支持两种转录处理模式，用户可在主界面实时切换：
 通过 WebSocket 连接 ASR 服务，边说边识别，文本即时呈现。
 
 - **流程**：
-  1. 用户点击"开始录音"
-  2. 建立与 ASR 后端的 WebSocket 连接
-  3. 音频采集线程持续将数据写入环形缓冲区
-  4. 后台 Tokio 任务从缓冲区读取 chunk → 重采样至 16kHz/16bit/单声道 PCM → 通过 WebSocket 发送
-  5. 接收服务端实时返回的中间识别结果（`partial_result`）
-  6. 通过 `cx.spawn()` 增量更新到文本编辑器中
-  7. 用户停止录音 → 发送结束信号 → 接收最终结果（`final_result`）→ 替换对应段落的中间结果
+    1. 用户点击"开始录音"
+    2. 建立与 ASR 后端的 WebSocket 连接
+    3. 音频采集线程持续将数据写入环形缓冲区
+    4. 后台 Tokio 任务从缓冲区读取 chunk → 重采样至 16kHz/16bit/单声道 PCM → 通过 WebSocket 发送
+    5. 接收服务端实时返回的中间识别结果（`partial_result`）
+    6. 通过 `cx.spawn()` 增量更新到文本编辑器中
+    7. 用户停止录音 → 发送结束信号 → 接收最终结果（`final_result`）→ 替换对应段落的中间结果
 - **增量更新策略**：
-  - 使用**句子级稳定标记**（`is_final` / `sentence_end`）判断某段文本是否可以固化为最终结果
-  - 未稳定的尾部文本以斜体/浅色呈现（视觉区分），稳定后转为正常样式
-  - 用户可在识别过程中随时手动编辑已稳定的文本
+    - 使用**句子级稳定标记**（`is_final` / `sentence_end`）判断某段文本是否可以固化为最终结果
+    - 未稳定的尾部文本以斜体/浅色呈现（视觉区分），稳定后转为正常样式
+    - 用户可在识别过程中随时手动编辑已稳定的文本
 - **异常处理**：
-  - WebSocket 断开：自动重连（最多 3 次，指数退避），重连期间继续本地录音（数据不丢失）
-  - 重连失败：回退为离线模式，录音停止后将缓冲区数据作为离线请求发送
-  - Token 过期/鉴权失败：立即停止录音，弹出重新配置 API Key 的提示
+    - WebSocket 断开：自动重连（最多 3 次，指数退避），重连期间继续本地录音（数据不丢失）
+    - 重连失败：回退为离线模式，录音停止后将缓冲区数据作为离线请求发送
+    - Token 过期/鉴权失败：立即停止录音，弹出重新配置 API Key 的提示
 
 #### 3.2.2 离线整段转录 (Offline ASR)
 
 录音时仅做本地缓存，结束后一次性上传整段音频进行高精度识别。
 
 - **流程**：
-  1. 用户点击"开始录音"
-  2. 音频数据仅写入本地临时 WAV 文件（路径：`{OS temp dir}/voxink_recording_{timestamp}.wav`）
-  3. 用户点击"停止录音" → 关闭 WAV 文件 → UI 显示"正在识别中..."和 Loading 动画
-  4. 通过 HTTP POST 上传 WAV 文件至 ASR 后端
-  5. 接收完整转写结果 → 更新到文本编辑器
-  6. 删除临时 WAV 文件（或根据设置保留以便复查）
+    1. 用户点击"开始录音"
+    2. 音频数据仅写入本地临时 WAV 文件（路径：`{OS temp dir}/voxink_recording_{timestamp}.wav`）
+    3. 用户点击"停止录音" → 关闭 WAV 文件 → UI 显示"正在识别中..."和 Loading 动画
+    4. 通过 HTTP POST 上传 WAV 文件至 ASR 后端
+    5. 接收完整转写结果 → 更新到文本编辑器
+    6. 删除临时 WAV 文件（或根据设置保留以便复查）
 - **上传进度**：大文件上传显示进度条（百分比或 MB/总量）。
 - **超时处理**：HTTP 请求超时时间 120 秒（可配置），超时后提示用户"转写超时，请检查网络或缩短录音时长"。
 
 #### 3.2.3 本地 ASR 后端 (qwen-asr) — 完全离线运行
 
-**这不是一种独立的转录模式，而是"离线转录"模式的一种后端实现。** 当用户在设置中选择 ASR 后端为"本地 qwen-asr"时，离线转录流程完全在本地设备上运行 ASR 推理，音频数据**不离开本机**。
+**这不是一种独立的转录模式，而是"离线转录"模式的一种后端实现。** 当用户在设置中选择 ASR 后端为"本地 qwen-asr"
+时，离线转录流程完全在本地设备上运行 ASR 推理，音频数据**不离开本机**。
 
 ##### 引擎选型与约束
 
 - **唯一引擎**：`qwen-asr`（https://github.com/huanglizhuo/QwenASR）
-  - 基于 **Qwen3-ASR** 模型的 CPU-only、纯 Rust 实现的语音识别引擎
-  - 无需 GPU、无需 FFI/C 依赖，完全由 Rust 生态承载
-  - 中文识别精度优秀，支持多语言混合识别
+    - 基于 **Qwen3-ASR** 模型的 CPU-only、纯 Rust 实现的语音识别引擎
+    - 无需 GPU、无需 FFI/C 依赖，完全由 Rust 生态承载
+    - 中文识别精度优秀，支持多语言混合识别
 
 ##### 技术约束
 
-| 约束项 | 要求 | 说明 |
-|--------|------|------|
-| **推理设备** | CPU-only | 不支持 GPU 加速，设计上即纯 CPU 推理 |
-| **运行时依赖** | 纯 Rust | 无 C/C++ FFI 依赖 |
-| **模型格式** | Qwen3-ASR 原始权重 | 需通过 qwen-asr 提供的转换工具转为推理格式 |
-| **模型下载** | 首次启动引导下载 | 模型文件存储在 `{app data dir}/models/qwen-asr/` |
-| **音频输入** | 16kHz, 16-bit, 单声道 PCM | 与现有音频采集管线一致 |
-| **推理延迟** | 目标 < 3× 实时 | 取决于 CPU 性能 |
-| **内存占用** | 模型加载后额外 < 500MB | 取决于模型规格 |
-| **线程安全** | `Send + Sync` | 必须满足 `AsrBackend` trait 的 trait bound |
+| 约束项       | 要求                     | 说明                                        |
+|-----------|------------------------|-------------------------------------------|
+| **推理设备**  | CPU-only               | 不支持 GPU 加速，设计上即纯 CPU 推理                   |
+| **运行时依赖** | 纯 Rust                 | 无 C/C++ FFI 依赖                            |
+| **模型格式**  | Qwen3-ASR 原始权重         | 需通过 qwen-asr 提供的转换工具转为推理格式                |
+| **模型下载**  | 首次启动引导下载               | 模型文件存储在 `{app data dir}/models/qwen-asr/` |
+| **音频输入**  | 16kHz, 16-bit, 单声道 PCM | 与现有音频采集管线一致                               |
+| **推理延迟**  | 目标 < 3× 实时             | 取决于 CPU 性能                                |
+| **内存占用**  | 模型加载后额外 < 500MB        | 取决于模型规格                                   |
+| **线程安全**  | `Send + Sync`          | 必须满足 `AsrBackend` trait 的 trait bound     |
 
 ##### 模型规格
 
-| 规格 | 文件大小 | 推理速度 | WER | 推荐场景 |
-|------|---------|---------|-----|---------|
-| base | ~200MB | 最快 | ~10-15% | 日常快速转写 |
-| small | ~500MB | 中等 | ~8-12% | 需要较高精度 |
-| medium | ~1GB | 最慢 | ~5-10% | 专业场景，高精度需求 |
+| 规格     | 文件大小   | 推理速度 | WER     | 推荐场景       |
+|--------|--------|------|---------|------------|
+| base   | ~200MB | 最快   | ~10-15% | 日常快速转写     |
+| small  | ~500MB | 中等   | ~8-12%  | 需要较高精度     |
+| medium | ~1GB   | 最慢   | ~5-10%  | 专业场景，高精度需求 |
 
 ### 3.3 文本编辑与交互
 
@@ -330,17 +336,17 @@ VoxInk 支持两种转录处理模式，用户可在主界面实时切换：
 - **多行编辑**：支持任意文本输入、修改、删除、选择、复制、粘贴
 - **Undo/Redo**：支持撤销/重做操作（Ctrl+Z / Ctrl+Shift+Z 或 Cmd+Z / Cmd+Shift+Z）
 - **自动追加 vs 覆盖**：
-  - 实时模式：识别结果增量追加（后续句子追加到已有文本末尾）
-  - 此行为可在设置中切换为"每次录音覆盖已有文本"
-  - 离线模式：识别完成 → **追加**到已有文本末尾（保留之前的内容）
+    - 实时模式：识别结果增量追加（后续句子追加到已有文本末尾）
+    - 此行为可在设置中切换为"每次录音覆盖已有文本"
+    - 离线模式：识别完成 → **追加**到已有文本末尾（保留之前的内容）
 - **字数统计**：底部状态栏实时显示当前文本字数/字符数
 
 #### 3.3.2 一键复制
 
 - **复制按钮**：位于编辑器右下角，点击后将全部文本写入系统剪贴板
 - **复制反馈**：
-  - 按钮短暂变为"✓ 已复制"（1.5 秒后恢复）
-  - 同时触发轻量 Toast 提示"已复制到剪贴板"
+    - 按钮短暂变为"✓ 已复制"（1.5 秒后恢复）
+    - 同时触发轻量 Toast 提示"已复制到剪贴板"
 - **自动复制**（可选设置）：转录完成后自动将新内容复制到剪贴板
 
 #### 3.3.3 文本历史与会话管理（v1.1+）
@@ -355,11 +361,11 @@ VoxInk 支持两种转录处理模式，用户可在主界面实时切换：
 
 #### 3.4.1 默认快捷键
 
-| 功能 | Windows/Linux | macOS |
-|------|---------------|-------|
-| 开始/停止录音 | `Ctrl+Alt+Space` | `Cmd+Option+Space` |
-| 唤起/隐藏主窗口 | `Ctrl+Alt+V` | `Cmd+Option+V` |
-| 一键复制并粘贴到前台应用 | `Ctrl+Alt+B` | `Cmd+Option+B` |
+| 功能           | Windows/Linux    | macOS              |
+|--------------|------------------|--------------------|
+| 开始/停止录音      | `Ctrl+Alt+Space` | `Cmd+Option+Space` |
+| 唤起/隐藏主窗口     | `Ctrl+Alt+V`     | `Cmd+Option+V`     |
+| 一键复制并粘贴到前台应用 | `Ctrl+Alt+B`     | `Cmd+Option+B`     |
 
 #### 3.4.2 快捷键要求
 
@@ -373,16 +379,16 @@ VoxInk 支持两种转录处理模式，用户可在主界面实时切换：
 
 - 设置面板中提供开关选项
 - 实现方式：
-  - Windows：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-  - macOS：LaunchAgent plist (`~/Library/LaunchAgents/`)
-  - Linux：XDG Autostart `.desktop` 文件 (`~/.config/autostart/`)
+    - Windows：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+    - macOS：LaunchAgent plist (`~/Library/LaunchAgents/`)
+    - Linux：XDG Autostart `.desktop` 文件 (`~/.config/autostart/`)
 
 #### 3.5.2 系统托盘
 
 - **托盘图标**：
-  - 默认状态：应用图标（彩色）
-  - 录音中：图标叠加红色圆点徽标
-  - 识别中：图标叠加橙色旋转指示器
+    - 默认状态：应用图标（彩色）
+    - 录音中：图标叠加红色圆点徽标
+    - 识别中：图标叠加橙色旋转指示器
 - **左键单击**：唤起/隐藏主窗口（toggle）
 - **右键菜单**：打开主界面、开始/停止录音、最近转录（子菜单）、设置、关于、退出
 - **托盘 Tooltip**：显示应用名称 + 当前状态
@@ -400,34 +406,34 @@ VoxInk 支持两种转录处理模式，用户可在主界面实时切换：
 
 ### 4.1 性能指标
 
-| 指标 | 目标值 | 测量方法 |
-|------|--------|----------|
-| 应用冷启动时间 | < 1.5s | 从进程启动到主窗口首次渲染完成 |
-| 托盘唤起延迟 | < 200ms | 从点击托盘图标到窗口完全显示 |
-| 内存占用（空闲） | < 80MB | 应用启动后静置 1 分钟，无录音 |
-| 内存占用（录音中） | < 150MB | 实时 ASR 模式，1 分钟录音 |
-| CPU 占用（空闲） | < 1% | 同上 |
-| CPU 占用（本地 ASR） | < 50% 多核 | qwen-asr base 模型，现代 4 核 CPU |
-| 音频延迟（采集到发送） | < 100ms | 实时模式，从麦克风采集到 WebSocket 发送 |
-| 本地 WAV 文件大小 | ~5.5MB/分钟 | 16kHz, 16-bit, mono PCM |
+| 指标             | 目标值       | 测量方法                        |
+|----------------|-----------|-----------------------------|
+| 应用冷启动时间        | < 1.5s    | 从进程启动到主窗口首次渲染完成             |
+| 托盘唤起延迟         | < 200ms   | 从点击托盘图标到窗口完全显示              |
+| 内存占用（空闲）       | < 80MB    | 应用启动后静置 1 分钟，无录音            |
+| 内存占用（录音中）      | < 150MB   | 实时 ASR 模式，1 分钟录音            |
+| CPU 占用（空闲）     | < 1%      | 同上                          |
+| CPU 占用（本地 ASR） | < 50% 多核  | qwen-asr base 模型，现代 4 核 CPU |
+| 音频延迟（采集到发送）    | < 100ms   | 实时模式，从麦克风采集到 WebSocket 发送   |
+| 本地 WAV 文件大小    | ~5.5MB/分钟 | 16kHz, 16-bit, mono PCM     |
 
 ### 4.2 兼容性矩阵
 
-| 平台 | 最低版本 | 架构 |
-|------|---------|------|
-| Windows | Windows 10 21H2+ | x86_64, aarch64 |
-| macOS | macOS 13 Ventura+ | x86_64, aarch64 (Apple Silicon) |
-| Linux | Ubuntu 22.04+ / Fedora 38+ | x86_64 |
+| 平台      | 最低版本                       | 架构                              |
+|---------|----------------------------|---------------------------------|
+| Windows | Windows 10 21H2+           | x86_64, aarch64                 |
+| macOS   | macOS 13 Ventura+          | x86_64, aarch64 (Apple Silicon) |
+| Linux   | Ubuntu 22.04+ / Fedora 38+ | x86_64                          |
 
 ### 4.3 安全性
 
-| 安全项 | 措施 |
-|--------|------|
+| 安全项        | 措施                                               |
+|------------|--------------------------------------------------|
 | API Key 存储 | AES-256-GCM 加密，密钥派生自机器唯一标识（machine-id + 随机 salt） |
-| 网络通信 | 所有 ASR API 调用强制 HTTPS/WSS（TLS 1.2+） |
-| 本地数据 | 录音临时文件和转写历史存储在应用私有数据目录 |
-| 依赖审计 | 定期 `cargo audit` 检查依赖漏洞 |
-| 日志脱敏 | 日志输出前过滤 API Key、Token 等敏感字段（替换为 `****`） |
+| 网络通信       | 所有 ASR API 调用强制 HTTPS/WSS（TLS 1.2+）              |
+| 本地数据       | 录音临时文件和转写历史存储在应用私有数据目录                           |
+| 依赖审计       | 定期 `cargo audit` 检查依赖漏洞                          |
+| 日志脱敏       | 日志输出前过滤 API Key、Token 等敏感字段（替换为 `****`）          |
 
 ### 4.4 可访问性（v1.2+）
 
@@ -441,14 +447,14 @@ VoxInk 支持两种转录处理模式，用户可在主界面实时切换：
 
 ### 5.1 窗口规格
 
-| 属性 | 值 |
-|------|-----|
-| 默认窗口尺寸 | 480 × 600 px |
-| 最小窗口尺寸 | 360 × 400 px |
-| 最大窗口尺寸 | 800 × 1200 px |
-| 字体 | 系统默认（中文：Microsoft YaHei / PingFang SC / Noto Sans CJK） |
-| 字体大小 | 正文 14px，标题 18px，状态栏 12px |
-| 圆角 | 窗口 12px，按钮 8px，输入框 6px |
+| 属性     | 值                                                      |
+|--------|--------------------------------------------------------|
+| 默认窗口尺寸 | 480 × 600 px                                           |
+| 最小窗口尺寸 | 360 × 400 px                                           |
+| 最大窗口尺寸 | 800 × 1200 px                                          |
+| 字体     | 系统默认（中文：Microsoft YaHei / PingFang SC / Noto Sans CJK） |
+| 字体大小   | 正文 14px，标题 18px，状态栏 12px                               |
+| 圆角     | 窗口 12px，按钮 8px，输入框 6px                                 |
 
 ### 5.2 主界面布局
 
@@ -520,9 +526,9 @@ VoxInk 的 ASR 能力通过 **Trait 抽象** 实现后端可插拔，支持：
 
 ```rust
 /// ASR 后端统一接口
-/// 
+///
 /// 所有 ASR 后端（云服务、本地引擎、自定义服务）必须实现此 trait。
-/// 
+///
 /// Trait 要求 Send + Sync（可在线程间安全传递）+
 /// 'static（可放入 tokio::spawn）。
 #[async_trait]
@@ -547,7 +553,7 @@ pub trait AsrBackend: Send + Sync + 'static {
     async fn validate_config(&self, config: &AsrConfig) -> Result<(), AsrError>;
 
     /// 实时流式识别
-    /// 
+    ///
     /// # 参数
     /// - `config`: ASR 配置（API Key、Endpoint 等）
     /// - `audio_rx`: 音频 chunk 接收通道
@@ -564,11 +570,11 @@ pub trait AsrBackend: Send + Sync + 'static {
     ) -> Result<(), AsrError>;
 
     /// 离线整段识别
-    /// 
+    ///
     /// # 参数
     /// - `config`: ASR 配置
     /// - `audio_data`: 完整的 WAV 文件字节数据
-    /// 
+    ///
     /// # 返回
     /// - `Ok(String)`: 完整的转写文本
     async fn transcribe_offline(
@@ -596,7 +602,7 @@ pub struct StreamingResult {
 
 ```rust
 /// ASR 相关错误类型
-/// 
+///
 /// Agent 注意：所有后端实现必须使用此错误类型，
 /// 不得使用 anyhow 或字符串错误。
 #[derive(Debug, thiserror::Error)]
@@ -643,7 +649,7 @@ pub enum AsrError {
 
 ```rust
 /// ASR 后端工厂注册表
-/// 
+///
 /// 使用工厂模式，每个后端通过闭包创建实例。
 /// 运行时根据配置文件中的 backend_id 获取对应后端。
 pub struct AsrBackendRegistry {
@@ -653,12 +659,12 @@ pub struct AsrBackendRegistry {
 
 内置后端注册表：
 
-| 后端 ID | 名称 | 类型 | 支持流式 | 支持离线 | 默认启用 |
-|---------|------|------|---------|---------|---------|
-| `aliyun_bailian_streaming` | 阿里云百炼（实时） | 云服务 | ✅ | ❌ | ✅ |
-| `aliyun_bailian_offline` | 阿里云百炼（离线） | 云服务 | ❌ | ✅ | ✅ |
-| `generic_ws` | 通用 WebSocket | 云服务 | ✅ | ❌ | ✅ |
-| `qwen_asr_local` | 本地 qwen-asr | 本地 | ❌ | ✅ | ❌（需下载模型） |
+| 后端 ID                      | 名称           | 类型  | 支持流式 | 支持离线 | 默认启用     |
+|----------------------------|--------------|-----|------|------|----------|
+| `aliyun_bailian_streaming` | 阿里云百炼（实时）    | 云服务 | ✅    | ❌    | ✅        |
+| `aliyun_bailian_offline`   | 阿里云百炼（离线）    | 云服务 | ❌    | ✅    | ✅        |
+| `generic_ws`               | 通用 WebSocket | 云服务 | ✅    | ❌    | ✅        |
+| `qwen_asr_local`           | 本地 qwen-asr  | 本地  | ❌    | ✅    | ❌（需下载模型） |
 
 ### 6.5 配置结构
 
@@ -686,11 +692,11 @@ pub struct AsrConfig {
 
 ### 7.1 配置文件位置
 
-| 平台 | 路径 |
-|------|------|
-| Windows | `%APPDATA%\VoxInk\config.json` |
-| macOS | `~/Library/Application Support/VoxInk/config.json` |
-| Linux | `~/.config/VoxInk/config.json` |
+| 平台      | 路径                                                 |
+|---------|----------------------------------------------------|
+| Windows | `%APPDATA%\VoxInk\config.json`                     |
+| macOS   | `~/Library/Application Support/VoxInk/config.json` |
+| Linux   | `~/.config/VoxInk/config.json`                     |
 
 ### 7.2 配置文件结构
 
@@ -707,7 +713,8 @@ pub struct AsrConfig {
   },
   "asr": {
     "backend_id": "aliyun_bailian_streaming",
-    "default_mode": "streaming",           // "streaming" | "offline"（与 TranscriptionMode 枚举对应）
+    "default_mode": "streaming",
+    // "streaming" | "offline"（与 TranscriptionMode 枚举对应）
     "api_endpoint": "https://dashscope.aliyuncs.com/api/v1/...",
     "language": "zh",
     "max_recording_seconds": 600,
@@ -748,20 +755,20 @@ pub struct AsrConfig {
 
 ### 里程碑概览
 
-| # | 名称 | 预计工期 | 核心交付 | 依赖 |
-|---|------|---------|---------|------|
-| M1 | 项目初始化与基础 UI | 3-5 天 | GPUI 窗口 + 静态布局 | — |
-| M2 | 状态管理与交互 | 3-4 天 | 按钮状态机 + 剪贴板 + 配置读写 | M1 |
-| M3 | 本地录音引擎 | 4-6 天 | cpal 录音 + WAV 存储 | M2 |
-| M4 | 离线 ASR 对接 | 3-5 天 | HTTP 上传 + 转写结果展示 | M3 |
-| M5 | 系统托盘与自启动 | 3-4 天 | 托盘集成 + 开机自启 | M2 |
-| M6 | 实时 ASR 对接 | 5-7 天 | WebSocket 流式 + 增量更新 | M3 |
-| M7 | ASR 后端插件化 | 4-6 天 | Trait 抽象 + 多后端支持 | M4, M6 |
-| M8 | 本地 ASR 集成 | 5-8 天 | qwen-asr 推理 + 模型管理 | M7 |
-| M9 | 全局快捷键 | 3-5 天 | 全局热键 + 自定义绑定 UI | M5 |
-| M10 | 文本历史与会话 | 4-6 天 | SQLite 存储 + 历史面板 | M2 |
-| M11 | 设置面板完善 | 3-4 天 | 完整设置 UI + 主题切换 | M5 |
-| M12 | 测试、打包与发布 | 5-8 天 | CI/CD + 安装包 + 文档 | M1-M11 |
+| #   | 名称          | 预计工期  | 核心交付                | 依赖     |
+|-----|-------------|-------|---------------------|--------|
+| M1  | 项目初始化与基础 UI | 3-5 天 | GPUI 窗口 + 静态布局      | —      |
+| M2  | 状态管理与交互     | 3-4 天 | 按钮状态机 + 剪贴板 + 配置读写  | M1     |
+| M3  | 本地录音引擎      | 4-6 天 | cpal 录音 + WAV 存储    | M2     |
+| M4  | 离线 ASR 对接   | 3-5 天 | HTTP 上传 + 转写结果展示    | M3     |
+| M5  | 系统托盘与自启动    | 3-4 天 | 托盘集成 + 开机自启         | M2     |
+| M6  | 实时 ASR 对接   | 5-7 天 | WebSocket 流式 + 增量更新 | M3     |
+| M7  | ASR 后端插件化   | 4-6 天 | Trait 抽象 + 多后端支持    | M4, M6 |
+| M8  | 本地 ASR 集成   | 5-8 天 | qwen-asr 推理 + 模型管理  | M7     |
+| M9  | 全局快捷键       | 3-5 天 | 全局热键 + 自定义绑定 UI     | M5     |
+| M10 | 文本历史与会话     | 4-6 天 | SQLite 存储 + 历史面板    | M2     |
+| M11 | 设置面板完善      | 3-4 天 | 完整设置 UI + 主题切换      | M5     |
+| M12 | 测试、打包与发布    | 5-8 天 | CI/CD + 安装包 + 文档    | M1-M11 |
 
 ---
 
@@ -811,6 +818,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ##### 任务 1.3: 实现应用入口
 
 `src/main.rs` 中完成：
+
 - 初始化 `tracing_subscriber`（日志输出到控制台，默认 INFO 级别）
 - 创建 Tokio runtime
 - 启动 GPUI 应用，创建主窗口（480×600）
@@ -832,7 +840,7 @@ pub enum RecordingState {
 }
 
 /// 转录处理模式（用户在主界面切换）
-/// 
+///
 /// 注意：此枚举描述的是"如何处理音频数据"，而非"由谁识别"。
 /// ASR 后端的云端/本地选择由 `AsrConfig.backend_id` 决定。
 /// 本地后端（qwen-asr）当前仅支持 Offline 模式。
@@ -861,12 +869,14 @@ pub struct AppState {
 ##### 任务 1.5: 搭建 UI 布局骨架
 
 `src/app.rs` 中实现 GPUI View：
+
 - Header 区域：应用标题 `🎙 VoxInk` + 设置按钮（齿轮图标占位）
 - 控制区域：大录音按钮（居中，显示"🎤 开始录音"）+ 模式 Toggle + 状态文本
 - 文本编辑区域：多行文本输入框（使用 GPUI Editor）
 - Footer 区域：字数统计（左侧）+ "📋 一键复制"按钮（右侧）
 
 ⚠️ **避坑提示**：
+
 - GPUI 目前处于快速迭代期，API 可能变动。优先参考 GPUI 官方 examples 中的 `text_input` 和 `editor` 示例
 - GPUI 的 `WindowOptions` 中设置 `window_bounds` 控制窗口大小
 - 所有 UI 布局使用 GPUI 的 `div()` + `flex()` 组合，不要使用绝对定位
@@ -902,11 +912,11 @@ cargo run
 
 #### 关键文件
 
-| 文件 | 说明 |
-|------|------|
-| `Cargo.toml` | 项目依赖配置 |
-| `src/main.rs` | 应用入口点 |
-| `src/app.rs` | GPUI App + View 实现 |
+| 文件             | 说明                           |
+|----------------|------------------------------|
+| `Cargo.toml`   | 项目依赖配置                       |
+| `src/main.rs`  | 应用入口点                        |
+| `src/app.rs`   | GPUI App + View 实现           |
 | `src/state.rs` | AppState + RecordingState 定义 |
 
 ---
@@ -923,9 +933,9 @@ cargo run
 - RECORDING → 点击 → PROCESSING
 - PROCESSING → 完成/错误 → IDLE
 - 按钮文字和颜色随状态变化：
-  - IDLE: 绿色背景, "🎤 开始录音"
-  - RECORDING: 红色背景 + 脉冲动画, "⏹ 停止录音"
-  - PROCESSING: 橙色背景, "⏳ 处理中..."（不可点击）
+    - IDLE: 绿色背景, "🎤 开始录音"
+    - RECORDING: 红色背景 + 脉冲动画, "⏹ 停止录音"
+    - PROCESSING: 橙色背景, "⏳ 处理中..."（不可点击）
 
 ##### 任务 2.2: 剪贴板集成
 
@@ -998,6 +1008,7 @@ impl VoxInkConfig {
 ##### 任务 3.1: 音频设备探测
 
 `src/audio/capture.rs`：
+
 - 使用 `cpal` 枚举可用录音设备
 - 自动选择系统默认输入设备
 - 设备不可用时返回明确的错误类型，UI 显示友好提示
@@ -1005,6 +1016,7 @@ impl VoxInkConfig {
 ##### 任务 3.2: 环形缓冲区
 
 `src/audio/buffer.rs`：
+
 - 使用 `ringbuf` crate 实现单生产者（音频回调）单消费者（Tokio 任务）的无锁环形缓冲区
 - 缓冲区大小：建议 64KB（约 2 秒 16kHz/16bit/mono 音频）
 - `push(samples: &[f32])` — 音频回调中调用
@@ -1021,6 +1033,7 @@ impl VoxInkConfig {
 ##### 任务 3.4: 重采样管线
 
 `src/audio/resample.rs`：
+
 - 📦 引入 `rubato` crate（0.15+）
 - 实现 `Resampler` 结构体：输入任意采样率 → 输出 16kHz
 - 通道转换：多声道 → 单声道（取平均 `(L+R)/2`）
@@ -1030,6 +1043,7 @@ impl VoxInkConfig {
 ##### 任务 3.5: WAV 文件写入
 
 `src/audio/writer.rs`：
+
 - 📦 引入 `hound` crate（3.5+）
 - 创建临时 WAV 文件：`{temp_dir}/voxink_recording_{YYYYMMDD}_{HHMMSS}.wav`
 - 规格：16kHz, 16-bit, 单声道 PCM
@@ -1069,6 +1083,7 @@ ffprobe /tmp/voxink_recording_*.wav
 ##### 任务 4.1: HTTP 客户端封装
 
 `src/asr/client.rs`：
+
 - 基于 `reqwest::Client` 创建全局 HTTP 客户端
 - 配置：超时 120s、自动重定向、gzip 压缩、TLS 1.2+
 - 封装阿里云百炼 API 鉴权（Header: `Authorization: Bearer <api_key>`）
@@ -1076,12 +1091,13 @@ ffprobe /tmp/voxink_recording_*.wav
 ##### 任务 4.2: 离线 ASR API 对接
 
 `src/asr/backends/bailian_offline.rs`：
+
 - 实现 `BailianOfflineBackend` 结构体
 - `transcribe_offline()` 方法：
-  1. 读取 WAV 文件为 `Vec<u8>`
-  2. 构造 multipart/form-data 请求
-  3. POST 到百炼离线 ASR endpoint
-  4. 解析 JSON 响应，提取转写文本
+    1. 读取 WAV 文件为 `Vec<u8>`
+    2. 构造 multipart/form-data 请求
+    3. POST 到百炼离线 ASR endpoint
+    4. 解析 JSON 响应，提取转写文本
 - 接口地址：`POST https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription`
 
 ##### 任务 4.3: 异步任务管理
@@ -1098,6 +1114,7 @@ ffprobe /tmp/voxink_recording_*.wav
 ##### 任务 4.5: 错误处理
 
 对以下错误场景提供用户友好的提示：
+
 - 网络超时 → "网络连接超时，请检查网络"
 - API Key 无效 → "API Key 无效，请检查设置"
 - API 配额用尽 → "API 配额已用尽，请升级套餐"
@@ -1106,6 +1123,7 @@ ffprobe /tmp/voxink_recording_*.wav
 #### 🔧 人工操作
 
 Agent 在开始 M4 前需确认：
+
 1. 用户已注册阿里云百炼并获取 API Key
 2. API Key 已手动填入配置文件 `asr.api_key` 字段
 3. Agent 应使用解密后的 API Key 发送请求，而非加密密文
@@ -1130,6 +1148,7 @@ Agent 在开始 M4 前需确认：
 ##### 任务 5.1: 系统托盘集成
 
 `src/tray.rs`：
+
 - 📦 引入 `tray-icon` crate（0.19+）
 - 创建托盘图标（应用 logo 的 16×16、32×32 版本）
 - 左键单击：toggle 主窗口显示/隐藏
@@ -1143,6 +1162,7 @@ Agent 在开始 M4 前需确认：
 - `assets/` 目录下放置应用图标和托盘图标
 
 ⚠️ **避坑提示**：
+
 - macOS 上 GPUI 使用 `NSApplication` 事件循环，`tray-icon` 也依赖 Cocoa 主线程。确保在主线程上初始化托盘。
 - GPUI 的 `App::run()` 是阻塞的，需要在 GPUI 启动**之前**初始化托盘或使用 `cx.on_app_activated()` 回调。
 - 如果 `tray-icon` 与 GPUI 不兼容，考虑使用 `tao` crate（GPUI 依赖的窗口库）的托盘 API。
@@ -1150,6 +1170,7 @@ Agent 在开始 M4 前需确认：
 ##### 任务 5.3: 开机自启动
 
 `src/autolaunch.rs`：
+
 - 📦 引入 `auto-launch` crate（0.6+）
 - 实现 `set_autolaunch(enabled: bool)` 方法
 - 配置面板中加入开关 UI
@@ -1179,6 +1200,7 @@ Agent 在开始 M4 前需确认：
 ##### 任务 6.1: WebSocket 客户端封装
 
 `src/asr/websocket.rs`：
+
 - 基于 `tokio-tungstenite` 实现异步 WebSocket 客户端
 - 支持连接建立、鉴权、心跳保活（ping/pong，间隔 30s）
 - 自动重连：最多 3 次，指数退避（1s, 2s, 4s）
@@ -1187,6 +1209,7 @@ Agent 在开始 M4 前需确认：
 ##### 任务 6.2: 实时 ASR 协议实现
 
 `src/asr/backends/bailian_streaming.rs`：
+
 - 按照百炼实时 ASR 协议构造握手请求
 - 音频分帧发送：每帧 200ms（6400 bytes @ 16kHz/16bit/mono）
 - 使用 `tokio::time::interval(Duration::from_millis(200))` 定时发送
@@ -1195,6 +1218,7 @@ Agent 在开始 M4 前需确认：
 ##### 任务 6.3: 流式音频管道
 
 `src/audio/chunk_sender.rs`：
+
 - 使用 `tokio::sync::mpsc::channel::<Vec<u8>>(64)` 连接音频处理和 WebSocket 发送
 - 音频采集 → ringbuf → 重采样 → mpsc sender → WebSocket send
 - 接收线程 → 解析 JSON → mpsc sender → UI update
@@ -1263,6 +1287,7 @@ Agent 在开始 M4 前需确认：
 ##### 任务 7.5: 通用 WebSocket 后端
 
 `src/asr/backends/generic_ws.rs`：
+
 - 实现 `GenericWsBackend`，用户可配置自定义 WS URL
 - 支持自定义鉴权 Header
 
@@ -1302,6 +1327,7 @@ qwen-asr = { git = "https://github.com/huanglizhuo/QwenASR", optional = true }
 ##### 任务 8.2: 实现 AsrBackend trait
 
 `src/asr/backends/qwen_asr.rs` （通过 `#[cfg(feature = "local-asr")]` 条件编译）：
+
 - `transcribe_offline()`: WAV → qwen-asr 输入格式 → 推理 → 文本
 - `supports_streaming()` → `false`（qwen-asr 仅离线）
 - `supports_offline()` → `true`
@@ -1310,6 +1336,7 @@ qwen-asr = { git = "https://github.com/huanglizhuo/QwenASR", optional = true }
 ##### 任务 8.3: 模型管理模块
 
 `src/model_manager.rs`：
+
 - 模型下载（HTTP GET，带进度回调）
 - 断点续传（`Range` header）
 - SHA256 完整性校验
@@ -1332,6 +1359,7 @@ qwen-asr = { git = "https://github.com/huanglizhuo/QwenASR", optional = true }
 #### 🔧 人工操作
 
 Agent 在开始 M8 前需确认：
+
 1. `qwen-asr` crate 与 Rust Edition 2024 兼容
 2. qwen-asr 的模型文件托管位置（URL）
 3. 许可证兼容性确认（qwen-asr + Qwen3-ASR 模型 vs Apache 2.0）
@@ -1356,6 +1384,7 @@ Agent 在开始 M8 前需确认：
 ##### 任务 9.1: 跨平台热键抽象
 
 `src/hotkey/mod.rs`：
+
 ```rust
 pub trait HotkeyHandler: Send + Sync {
     fn on_recording_toggle(&self);
@@ -1363,7 +1392,9 @@ pub trait HotkeyHandler: Send + Sync {
     fn on_copy_and_paste(&self);
 }
 
-pub struct GlobalHotkeyManager { /* ... */ }
+pub struct GlobalHotkeyManager {
+    /* ... */
+}
 ```
 
 ##### 任务 9.2: 平台实现
@@ -1405,32 +1436,73 @@ pub struct GlobalHotkeyManager { /* ... */ }
 
 ```sql
 -- 会话表
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS sessions
+(
+    id
+    TEXT
+    PRIMARY
+    KEY,
+    name
+    TEXT
+    NOT
+    NULL,
+    created_at
+    TEXT
+    NOT
+    NULL,
+    updated_at
+    TEXT
+    NOT
+    NULL
 );
 
 -- 转录历史表
-CREATE TABLE IF NOT EXISTS transcriptions (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    mode TEXT NOT NULL,  -- "streaming" | "offline" | "local"
-    duration_secs INTEGER NOT NULL,
-    text TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
-);
+CREATE TABLE IF NOT EXISTS transcriptions
+(
+    id
+    TEXT
+    PRIMARY
+    KEY,
+    session_id
+    TEXT
+    NOT
+    NULL,
+    mode
+    TEXT
+    NOT
+    NULL, -- "streaming" | "offline" | "local"
+    duration_secs
+    INTEGER
+    NOT
+    NULL,
+    text
+    TEXT
+    NOT
+    NULL,
+    created_at
+    TEXT
+    NOT
+    NULL,
+    FOREIGN
+    KEY
+(
+    session_id
+) REFERENCES sessions
+(
+    id
+)
+    );
 
 -- 全文搜索索引
-CREATE VIRTUAL TABLE IF NOT EXISTS transcriptions_fts
+CREATE
+VIRTUAL TABLE IF NOT EXISTS transcriptions_fts
 USING fts5(text, content=transcriptions, content_rowid=rowid);
 ```
 
 ##### 任务 10.2: 历史面板 UI
 
 `src/history/panel.rs`：
+
 - 侧边栏抽屉展示历史列表
 - 每条显示：时间戳 + 模式图标 + 文本前 50 字预览
 - 点击条目载入编辑器
@@ -1440,6 +1512,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 ##### 任务 10.3: 会话管理
 
 `src/session.rs`：
+
 - 创建/切换/删除命名会话
 - 默认为 "默认会话"
 - 切换时编辑器内容切换
@@ -1472,6 +1545,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 ##### 任务 11.2: 主题系统
 
 `src/theme.rs`：
+
 - 定义 `ThemeColors` 结构体（背景、前景、强调色、各状态色等）
 - light / dark 两套主题预设
 - 跟随系统设置（通过 `dark-light` crate 或平台 API）
@@ -1480,6 +1554,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 ##### 任务 11.3: i18n 基础
 
 `src/i18n/`：
+
 - 定义翻译键值（中文 / English 初始版本）
 - 使用 `rust-i18n` crate 或简单的 HashMap 方案
 - 设置面板中切换语言后 UI 即时更新
@@ -1520,6 +1595,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 ##### 任务 12.3: CI/CD
 
 `.github/workflows/ci.yml`：
+
 ```yaml
 # 矩阵构建: Windows x86_64, macOS x86_64, macOS aarch64, Linux x86_64
 # 步骤: cargo fmt --check → cargo clippy → cargo test → cargo build --release
@@ -1565,17 +1641,17 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 
 ### 9.2 关键测试场景
 
-| 场景 | 测试类型 | 优先级 |
-|------|---------|-----|
-| 无麦克风设备时启动 | 集成 | P0 |
-| 网络断开时离线转写 | 集成 | P0 |
-| API Key 无效 | 集成 | P0 |
-| WebSocket 断开重连 | 集成 | P0 |
-| 配置加解密正确性 | 单元 | P0 |
-| 音频重采样精度 | 单元 | P0 |
-| 状态机非法转换 | 单元 | P1 |
-| 多平台托盘行为 | E2E | P1 |
-| 长录音（10 分钟）稳定性 | E2E | P1 |
+| 场景             | 测试类型 | 优先级 |
+|----------------|------|-----|
+| 无麦克风设备时启动      | 集成   | P0  |
+| 网络断开时离线转写      | 集成   | P0  |
+| API Key 无效     | 集成   | P0  |
+| WebSocket 断开重连 | 集成   | P0  |
+| 配置加解密正确性       | 单元   | P0  |
+| 音频重采样精度        | 单元   | P0  |
+| 状态机非法转换        | 单元   | P1  |
+| 多平台托盘行为        | E2E  | P1  |
+| 长录音（10 分钟）稳定性  | E2E  | P1  |
 
 ---
 
@@ -1583,12 +1659,12 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 
 ### 10.1 发布渠道
 
-| 渠道 | 平台 | 说明 |
-|------|------|------|
-| GitHub Releases | 全部 | 主要发布渠道 |
-| Homebrew Cask | macOS | `brew install voxink` |
-| Winget | Windows | `winget install VoxInk` |
-| AUR | Linux (Arch) | `yay -S voxink` |
+| 渠道              | 平台           | 说明                      |
+|-----------------|--------------|-------------------------|
+| GitHub Releases | 全部           | 主要发布渠道                  |
+| Homebrew Cask   | macOS        | `brew install voxink`   |
+| Winget          | Windows      | `winget install VoxInk` |
+| AUR             | Linux (Arch) | `yay -S voxink`         |
 
 ### 10.2 版本管理
 
@@ -1609,6 +1685,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：GPUI 生态仍在快速发展，官方多行可编辑文本输入框的 API 可能不够成熟。
 
 **解决方案**：
+
 - 参考 GPUI 官方 `examples/` 中的 `text_input` 和 `editor` 示例
 - 关注 `gpui::Editor` 和 `gpui::TextElement` 的最新 API
 - 备选方案：使用 `gpui-component` 库中的 `TextInput` 组件
@@ -1619,6 +1696,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：音频 I/O 和网络请求必须在后台执行，不能阻塞 GPUI 渲染线程。
 
 **解决方案**：
+
 - 音频采集：`cpal` 回调中**仅做** `ringbuf.push()`，不进行任何阻塞操作
 - 重采样：在独立的 Tokio 任务中从 ringbuf 读取并处理
 - 网络请求：在 Tokio 任务中执行，结果通过 `cx.spawn()` 回 UI
@@ -1635,6 +1713,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：GPUI 有自己的事件循环，`tray-icon` 等库可能依赖平台原生事件循环。
 
 **解决方案**：
+
 - macOS：GPUI 内部已处理 NSApplication 事件循环，`tray-icon` 需在主线程上初始化
 - Windows：使用 `tray-icon` 的 Win32 后端，与 GPUI 的 Windows 事件循环一般兼容
 - Linux：依赖 GTK/X11 的托盘实现可能与 GPUI 有冲突，需测试验证
@@ -1645,6 +1724,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：ASR 服务要求 16kHz/16bit/mono PCM，系统麦克风可能是 44.1kHz/48kHz 多声道。
 
 **解决方案**：
+
 - 使用 `cpal` 查询设备支持的配置，优先选择最接近目标的原生配置
 - 使用 `rubato` crate 进行高质量 sinc 重采样
 - 通道转换：多声道→单声道取平均
@@ -1656,6 +1736,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：实时 ASR 要求持续发送固定时长的音频帧，发送过快浪费带宽，过慢影响实时性。
 
 **解决方案**：
+
 - 推荐帧长：200ms（6400 bytes @ 16kHz/16bit/mono）
 - 使用 `tokio::time::interval` 定时从 ringbuf 中取出 200ms 音频数据发送
 - 音频通道和网络通道之间使用 `tokio::sync::mpsc::channel`（缓冲区 64）
@@ -1665,6 +1746,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：全局热键 API 在各平台差异巨大，且需要进程全局监听。
 
 **解决方案**：
+
 - 优先使用 `global-hotkey` crate（若成熟可用），否则分平台实现
 - Windows：`RegisterHotKey` + `WM_HOTKEY` 消息循环
 - macOS：`CGEvent` tap 或 `NSEvent.addGlobalMonitorForEventsMatchingMask`
@@ -1676,6 +1758,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：macOS Gatekeeper 要求应用经过代码签名和公证。
 
 **解决方案**：
+
 - 需要 Apple Developer Program 会员
 - CI 中使用 `codesign` 签名 + `xcrun notarytool` 提交公证
 - 若无法获得开发者证书，提供 Homebrew 编译安装方式作为替代
@@ -1685,6 +1768,7 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 **难点**：将纯 Rust、CPU-only 推理引擎嵌入异步架构，需处理模型生命周期和线程隔离。
 
 **解决方案**：
+
 - 模型生命周期：`OnceCell` 实现惰性加载和全局复用
 - 阻塞推理隔离：通过 `tokio::task::spawn_blocking` 提交到专用线程池
 - `max_blocking_threads` 至少为 4
@@ -1695,20 +1779,20 @@ USING fts5(text, content=transcriptions, content_rowid=rowid);
 
 ## 12. 术语表
 
-| 术语 | 英文 | 说明 |
-|------|------|------|
-| ASR | Automatic Speech Recognition | 自动语音识别 |
-| PCM | Pulse-Code Modulation | 脉冲编码调制，原始未压缩音频 |
-| WAV | Waveform Audio File Format | 音频文件格式 |
-| VAD | Voice Activity Detection | 语音活动检测 |
-| Ring Buffer | Ring Buffer | 环形缓冲区，无锁循环队列 |
-| Resampling | Resampling | 音频采样率转换 |
-| MPSC | Multiple Producer Single Consumer | 多生产者单消费者通道 |
-| GPUI | GPUI | Zed 编辑器的 Rust UI 框架 |
-| WER | Word Error Rate | 词错率，ASR 准确度指标 |
-| qwen-asr | qwen-asr | 纯 Rust CPU-only Qwen3-ASR 本地推理引擎 |
-| spawn_blocking | spawn_blocking | Tokio 将阻塞任务提交到专用线程池的方法 |
-| HKDF | HMAC-based Key Derivation Function | 密钥派生函数 |
+| 术语             | 英文                                 | 说明                               |
+|----------------|------------------------------------|----------------------------------|
+| ASR            | Automatic Speech Recognition       | 自动语音识别                           |
+| PCM            | Pulse-Code Modulation              | 脉冲编码调制，原始未压缩音频                   |
+| WAV            | Waveform Audio File Format         | 音频文件格式                           |
+| VAD            | Voice Activity Detection           | 语音活动检测                           |
+| Ring Buffer    | Ring Buffer                        | 环形缓冲区，无锁循环队列                     |
+| Resampling     | Resampling                         | 音频采样率转换                          |
+| MPSC           | Multiple Producer Single Consumer  | 多生产者单消费者通道                       |
+| GPUI           | GPUI                               | Zed 编辑器的 Rust UI 框架              |
+| WER            | Word Error Rate                    | 词错率，ASR 准确度指标                    |
+| qwen-asr       | qwen-asr                           | 纯 Rust CPU-only Qwen3-ASR 本地推理引擎 |
+| spawn_blocking | spawn_blocking                     | Tokio 将阻塞任务提交到专用线程池的方法           |
+| HKDF           | HMAC-based Key Derivation Function | 密钥派生函数                           |
 
 ---
 
@@ -1800,28 +1884,28 @@ VoxInk/
 ### 附录 B：阿里云百炼 ASR API 参考
 
 - **WebSocket 实时 ASR**：`wss://dashscope.aliyuncs.com/api-ws/v1/inference`
-  - 协议：二进制帧 + JSON 控制帧
-  - 要求：16kHz, 16-bit, 单声道 PCM
-  - 鉴权：Header `Authorization: Bearer <api_key>`
+    - 协议：二进制帧 + JSON 控制帧
+    - 要求：16kHz, 16-bit, 单声道 PCM
+    - 鉴权：Header `Authorization: Bearer <api_key>`
 - **HTTP 离线 ASR**：`POST https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription`
-  - 格式：multipart/form-data（音频文件）+ JSON 参数
-  - 支持格式：WAV, MP3, FLAC
-  - 最大文件：500MB
+    - 格式：multipart/form-data（音频文件）+ JSON 参数
+    - 支持格式：WAV, MP3, FLAC
+    - 最大文件：500MB
 - 详细文档：https://help.aliyun.com/document_detail/dashscope/
 
 ### 附录 C：qwen-asr（本地 ASR 引擎）技术约束
 
-| 项目 | 内容 |
-|------|------|
-| **仓库** | https://github.com/huanglizhuo/QwenASR |
-| **模型** | Qwen3-ASR（阿里巴巴通义千问团队） |
-| **实现语言** | 纯 Rust，无 C/C++ FFI 依赖 |
-| **推理设备** | CPU-only，不支持 GPU |
-| **支持模式** | 仅离线整段识别（不支持流式） |
-| **音频输入** | 16kHz, 16-bit, 单声道 PCM WAV |
-| **模型规格** | base (~200MB) / small (~500MB) / medium (~1GB) |
-| **Rust Edition** | 需确认与 Edition 2024 兼容 |
-| **Send + Sync** | 模型实例必须满足（`AsrBackend` trait bound） |
+| 项目               | 内容                                             |
+|------------------|------------------------------------------------|
+| **仓库**           | https://github.com/huanglizhuo/QwenASR         |
+| **模型**           | Qwen3-ASR（阿里巴巴通义千问团队）                          |
+| **实现语言**         | 纯 Rust，无 C/C++ FFI 依赖                          |
+| **推理设备**         | CPU-only，不支持 GPU                               |
+| **支持模式**         | 仅离线整段识别（不支持流式）                                 |
+| **音频输入**         | 16kHz, 16-bit, 单声道 PCM WAV                     |
+| **模型规格**         | base (~200MB) / small (~500MB) / medium (~1GB) |
+| **Rust Edition** | 需确认与 Edition 2024 兼容                           |
+| **Send + Sync**  | 模型实例必须满足（`AsrBackend` trait bound）             |
 
 ### 附录 D：GPUI 参考资源
 

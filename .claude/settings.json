@@ -27,9 +27,7 @@
       "PowerShell(cargo publish)"
     ],
     "deny": [
-      "Bash(rm -rf *)",
-      "PowerShell(Remove-Item -Force *)",
-      "PowerShell(Remove-Item -Recurse -Force *)"
+      "Bash(rm -rf *)"
     ]
   }
 }

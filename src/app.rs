@@ -1,21 +1,32 @@
-//! 主界面 View —— M1 任务 1.5 / §6.2 主界面布局。
+//! 主界面 View —— M1 任务 1.5 / §6.2 主界面布局；M2 任务 2.1/2.2/2.5 交互。
 //!
-//! 布局自上而下：Header / 控制区（录音按钮 + 模式 Toggle + 状态）/ 文本编辑区 / Footer。
-//! M1 阶段按钮点击仅打印日志（任务 1.6），状态机与剪贴板反馈在 M2 落地。
+//! - 录音按钮状态机：Idle ↔ Recording（M2 仅 UI 切换，真实录音在 M3）。
+//! - 一键复制：arboard 写入系统剪贴板，"✓ 已复制" 1.5s 反馈 + Toast。
+//! - 模式切换：同步写入全局配置，退出时持久化。
 
+use std::time::Duration;
+
+use anyhow::{Context as _, Result};
 use gpui::{
-    ClipboardItem, Context, Entity, Focusable, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window, div, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, ClickEvent, Context, Entity, Focusable, IntoElement,
+    ParentElement, Render, SharedString, Styled, Window, div, ease_in_out, prelude::*, px, rgb,
+    white,
 };
 use gpui_component::{
-    ActiveTheme, Sizable,
+    ActiveTheme, WindowExt,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
     v_flex,
 };
 
+use crate::config::VoxInkConfig;
 use crate::state::{AppState, RecordingState, TranscriptionMode};
+
+/// 以全局形式承载持久化配置，便于跨 View 读写、退出时统一保存。
+pub struct GlobalConfig(pub VoxInkConfig);
+
+impl gpui::Global for GlobalConfig {}
 
 /// VoxInk 主窗口视图。
 pub struct VoxInk {
@@ -23,6 +34,8 @@ pub struct VoxInk {
     state: AppState,
     /// 文本编辑器状态（gpui-component 多行输入）。
     editor: Entity<InputState>,
+    /// 复制成功后的短暂反馈标记（1.5s 后复位）。
+    copied: bool,
 }
 
 impl VoxInk {
@@ -33,6 +46,12 @@ impl VoxInk {
                 .placeholder("点击「开始录音」用语音输入提示词，或直接在此编辑……")
         });
 
+        // 初始转录模式取自持久化配置（§2.7 default_mode）。
+        let mut state = AppState::default();
+        if let Some(global) = cx.try_global::<GlobalConfig>() {
+            state.transcription_mode = global.0.asr.default_mode;
+        }
+
         // 启动时聚焦编辑器，便于直接键盘输入。
         let focus_handle = editor.focus_handle(cx);
         window.defer(cx, move |window, cx| {
@@ -40,8 +59,9 @@ impl VoxInk {
         });
 
         Self {
-            state: AppState::default(),
+            state,
             editor,
+            copied: false,
         }
     }
 
@@ -60,26 +80,70 @@ impl VoxInk {
         }
     }
 
-    fn on_toggle_recording(&mut self, _: &gpui::ClickEvent, _: &mut Window, _: &mut Context<Self>) {
-        // M1：占位逻辑，仅打印日志；状态机在 M2 实现。
-        tracing::info!(state = ?self.state.recording_state, "录音按钮被点击");
+    /// 录音按钮点击：Idle → Recording → Idle 切换（§4.1.2；M2 不经过 Processing）。
+    fn on_toggle_recording(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.recording_state = match self.state.recording_state {
+            RecordingState::Idle => RecordingState::Recording,
+            RecordingState::Recording => RecordingState::Idle,
+            // Processing 不可点击，理论上不会到这里。
+            RecordingState::Processing => RecordingState::Processing,
+        };
+        tracing::info!(state = ?self.state.recording_state, "录音状态切换");
+        cx.notify();
     }
 
     fn on_select_mode(&mut self, mode: TranscriptionMode, cx: &mut Context<Self>) {
+        if self.state.transcription_mode == mode {
+            return;
+        }
         self.state.transcription_mode = mode;
+
+        // 同步到全局配置（退出时落盘）。
+        if cx.try_global::<GlobalConfig>().is_some() {
+            let mut updated = cx.global::<GlobalConfig>().0.clone();
+            updated.asr.default_mode = mode;
+            cx.set_global(GlobalConfig(updated));
+        }
+
         tracing::info!(?mode, "切换转录模式");
         cx.notify();
     }
 
-    fn on_copy(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_copy(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value().to_string();
         tracing::info!(chars = text.chars().count(), "复制按钮被点击");
-        if !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+
+        if text.is_empty() {
+            window.push_notification("没有可复制的内容", cx);
+            return;
+        }
+
+        match copy_to_clipboard(&text) {
+            Ok(()) => {
+                self.copied = true;
+                cx.notify();
+                window.push_notification("已复制到剪贴板", cx);
+
+                // 1.5 秒后复位"✓ 已复制"反馈。
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1500))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.copied = false;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            Err(e) => {
+                tracing::error!("复制失败: {e:#}");
+                window.push_notification("复制失败", cx);
+            }
         }
     }
 
-    fn on_open_settings(&mut self, _: &gpui::ClickEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_open_settings(&mut self, _: &ClickEvent, _: &mut Window, _: &mut Context<Self>) {
         tracing::info!("设置按钮被点击");
     }
 
@@ -106,15 +170,58 @@ impl VoxInk {
             )
     }
 
+    /// 录音按钮：按状态变色/变字；Recording 时叠加脉冲呼吸动画；Processing 不可点击。
+    fn render_record_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (bg, label, clickable) = match self.state.recording_state {
+            RecordingState::Idle => (rgb(0x27AE60), "🎤 开始录音", true),
+            RecordingState::Recording => (rgb(0xE74C3C), "⏹ 停止录音", true),
+            RecordingState::Processing => (rgb(0xF39C12), "⏳ 处理中…", false),
+        };
+
+        let mut button = div()
+            .id("record-button")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w_full()
+            .h(px(48.))
+            .rounded(px(8.))
+            .bg(bg)
+            .text_color(white())
+            .text_lg()
+            .child(label);
+
+        if clickable {
+            button = button
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.92))
+                .on_click(cx.listener(Self::on_toggle_recording));
+        } else {
+            button = button.opacity(0.85);
+        }
+
+        if self.state.recording_state == RecordingState::Recording {
+            button
+                .with_animation(
+                    "record-pulse",
+                    Animation::new(Duration::from_millis(1200))
+                        .repeat()
+                        .with_easing(ease_in_out),
+                    |this, delta| {
+                        // 三角波 0→1→0，营造脉冲呼吸感。
+                        let t = 1.0 - (2.0 * delta - 1.0).abs();
+                        this.opacity(0.6 + 0.4 * t)
+                    },
+                )
+                .into_any_element()
+        } else {
+            button.into_any_element()
+        }
+    }
+
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, status_color) = self.status();
         let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
-
-        let record_label = match self.state.recording_state {
-            RecordingState::Idle => "🎤 开始录音",
-            RecordingState::Recording => "⏹ 停止录音",
-            RecordingState::Processing => "⏳ 处理中…",
-        };
 
         v_flex()
             .w_full()
@@ -122,15 +229,7 @@ impl VoxInk {
             .px_4()
             .py_4()
             .items_center()
-            // 录音按钮（主操作区）
-            .child(
-                Button::new("record")
-                    .primary()
-                    .large()
-                    .w_full()
-                    .label(record_label)
-                    .on_click(cx.listener(Self::on_toggle_recording)),
-            )
+            .child(self.render_record_button(cx))
             // 转录模式切换：实时 / 离线
             .child(
                 h_flex()
@@ -168,19 +267,14 @@ impl VoxInk {
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex_1()
-            .w_full()
-            .px_4()
-            .py_2()
-            .child(
-                div()
-                    .size_full()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(px(6.))
-                    .child(Input::new(&self.editor).h_full().bordered(false)),
-            )
+        div().flex_1().w_full().px_4().py_2().child(
+            div()
+                .size_full()
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded(px(6.))
+                .child(Input::new(&self.editor).h_full().bordered(false)),
+        )
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -200,7 +294,11 @@ impl VoxInk {
             .child(
                 Button::new("copy")
                     .primary()
-                    .label("📋 一键复制")
+                    .label(if self.copied {
+                        "✓ 已复制"
+                    } else {
+                        "📋 一键复制"
+                    })
                     .on_click(cx.listener(Self::on_copy)),
             )
     }
@@ -217,4 +315,14 @@ impl Render for VoxInk {
             .child(self.render_editor(cx))
             .child(self.render_footer(cx))
     }
+}
+
+/// 复制文本到系统剪贴板（任务 2.2，使用 `arboard`）。
+///
+/// 注：Windows/macOS 下设置后内容常驻系统剪贴板；Linux(X11) 的所有权语义不同，
+/// 后续若支持 Linux 需保持 Clipboard 实例存活，留待相应里程碑处理。
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    let mut clipboard = arboard::Clipboard::new().context("打开系统剪贴板失败")?;
+    clipboard.set_text(text.to_owned()).context("写入剪贴板失败")?;
+    Ok(())
 }

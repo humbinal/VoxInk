@@ -26,6 +26,7 @@ pub enum RecordingState {
 /// "由谁识别"（云端/本地）由 `AsrConfig.backend_id` 决定（见 §2.5）。
 /// 本地后端（qwen-asr）当前仅支持 Offline 模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TranscriptionMode {
     /// 实时流式：音频分帧实时发送，识别结果增量返回
     Streaming,

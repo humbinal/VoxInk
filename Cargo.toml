@@ -34,5 +34,20 @@ anyhow = "1"
 # 日期时间（§1.4）
 chrono = { version = "0.4.44", features = ["std", "serde"] }
 
+# 配置持久化（§2.7, §8）
+toml = "0.8"
+directories = "6"
+
+# 剪贴板（§4.3.2，任务 2.2）
+arboard = "3"
+
+# API Key 加密：纯 Rust，AES-256-GCM + HKDF（§8.3，任务 2.4）。不使用 ring。
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
+machine-uid = "0.5"
+
 [build-dependencies]
 winresource = "0.1.31"

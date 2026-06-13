@@ -1,13 +1,15 @@
-//! VoxInk 应用入口 —— M1 任务 1.3。
+//! VoxInk 应用入口 —— M1 任务 1.3；M2 任务 2.3（配置生命周期）。
 //!
-//! 职责：初始化日志、创建 Tokio 运行时、启动 GPUI 应用并打开主窗口（480×600）。
+//! 职责：初始化日志、创建 Tokio 运行时、加载/保存配置、启动 GPUI 并打开主窗口（480×600）。
 
 mod app;
+mod config;
 mod state;
 
 use anyhow::Result;
-use app::VoxInk;
-use gpui::{Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+use app::{GlobalConfig, VoxInk};
+use config::VoxInkConfig;
+use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 use tracing_subscriber::EnvFilter;
@@ -27,7 +29,6 @@ fn main() -> Result<()> {
     init_tracing();
 
     // 创建 Tokio 多线程运行时，供后续里程碑（音频 I/O、网络、本地推理）调度耗时任务。
-    // 进入运行时上下文后 `tokio::spawn` 可在 GPUI 主线程触发的回调中使用。
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .build()
         .expect("无法创建 Tokio 运行时");
@@ -35,14 +36,44 @@ fn main() -> Result<()> {
 
     tracing::info!("VoxInk 启动中……");
 
+    // 启动时加载配置（不存在则用默认值；密文 API Key 自动解密为内存明文）。
+    let config = VoxInkConfig::load();
+
+    // 首次运行将默认配置落盘，便于用户查看/编辑。
+    if let Ok(path) = VoxInkConfig::config_path()
+        && !path.exists()
+    {
+        match config.save() {
+            Ok(()) => tracing::info!("已创建默认配置: {}", path.display()),
+            Err(e) => tracing::error!("写入默认配置失败: {e:#}"),
+        }
+    }
+
     let app = gpui_platform::application().with_assets(Assets);
-    app.run(|cx| {
+    app.run(move |cx| {
         // 初始化 gpui-component（主题、输入、菜单等子系统）。
         gpui_component::init(cx);
 
         // 将 gpui-component 内置文案设为简体中文（右键菜单剪切/复制/粘贴、对话框按钮等）。
         // 其 locale 默认 "en" 且与系统语言无关；M11 将改为跟随配置项 general.language。
         gpui_component::set_locale("zh-CN");
+
+        // 配置以全局形式承载，供各 View 读写。
+        cx.set_global(GlobalConfig(config.clone()));
+
+        // 退出时持久化配置（含已加密的 API Key）。
+        cx.on_app_quit(|cx: &mut App| {
+            let config = cx.try_global::<GlobalConfig>().map(|g| g.0.clone());
+            async move {
+                if let Some(config) = config {
+                    match config.save() {
+                        Ok(()) => tracing::info!("配置已保存"),
+                        Err(e) => tracing::error!("保存配置失败: {e:#}"),
+                    }
+                }
+            }
+        })
+        .detach();
 
         let bounds = Bounds::centered(None, size(px(480.), px(600.)), cx);
         cx.open_window(

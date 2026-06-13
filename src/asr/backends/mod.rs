@@ -5,3 +5,4 @@
 pub mod bailian_filetrans;
 pub mod bailian_offline;
 pub mod bailian_streaming;
+pub mod generic_ws;

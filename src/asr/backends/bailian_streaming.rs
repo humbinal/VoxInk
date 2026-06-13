@@ -61,9 +61,12 @@ impl AsrBackend for BailianStreamingBackend {
     }
 
     async fn validate_config(&self, config: &AsrConfig) -> Result<(), AsrError> {
-        if config.api_key.trim().is_empty() {
+        let api_key = config.api_key.trim();
+        if api_key.is_empty() {
             return Err(AsrError::AuthError);
         }
+        // 真实握手测试（连接成功即通过；401/403 → AuthError）。
+        let _ws = connect(&resolve_endpoint(config), api_key).await?;
         Ok(())
     }
 
@@ -77,13 +80,7 @@ impl AsrBackend for BailianStreamingBackend {
         if api_key.is_empty() {
             return Err(AsrError::AuthError);
         }
-        // §2.7 默认 api_endpoint 是旧的 inference URL，对本模型不适用；仅当用户显式配置了
-        // realtime 端点时才覆盖，否则用本模型的 realtime URL。
-        let endpoint = if config.api_endpoint.contains("/realtime") {
-            config.api_endpoint.clone()
-        } else {
-            format!("{WS_BASE}?model={MODEL}")
-        };
+        let endpoint = resolve_endpoint(config);
         let lang = language_hint(&config.language);
 
         let mut attempt = 0usize;
@@ -343,6 +340,16 @@ fn finish_message() -> Value {
 
 fn event_id() -> String {
     format!("event_{}", Uuid::new_v4())
+}
+
+/// 解析 WebSocket 端点。§2.7 默认 api_endpoint 是旧 inference URL，对本模型不适用；
+/// 仅当用户显式配置了含 `/realtime` 的端点才覆盖，否则用本模型的 realtime URL。
+fn resolve_endpoint(config: &AsrConfig) -> String {
+    if config.api_endpoint.contains("/realtime") {
+        config.api_endpoint.clone()
+    } else {
+        format!("{WS_BASE}?model={MODEL}")
+    }
 }
 
 /// 语言：明确时下发，"auto" 时省略让模型自动判别。

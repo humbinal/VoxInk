@@ -1123,12 +1123,15 @@ ffprobe <生成的 wav 文件>
 
 **任务 7.2: 通用 WebSocket 后端（`src/asr/backends/generic_ws.rs`）**
 - 实现 `GenericWsBackend`，用户可配置自定义 WS URL 与鉴权 Header。
+- 📝 **M7 落地约定**：`api_endpoint` 填 `ws(s)://` URL，`api_key` 非空则作 `Authorization: Bearer`。约定协议：客户端发**二进制 PCM 帧**（16kHz/16bit/mono）；服务端回文本帧，JSON `{"text","is_final"}` 优先，否则纯文本作中间结果；停止时客户端发 Close，服务端给最终结果后关闭。无真实自建服务时端到端不可测，仅保证可注册/可切换。
 
 **任务 7.3: 注册表完善**
 - 注册全部内置后端（📐 [§2.6](#26-后端注册表与内置后端契约) 清单）；提供按 id 取实例、枚举后端及能力。
+- 📝 **M7 落地**：已注册 `aliyun_bailian_offline`/`aliyun_bailian_filetrans`/`aliyun_bailian_streaming`/`generic_ws`（`qwen_asr_local` 属 M8，届时注册）。应用层用 `resolve_backend_id(config, want_streaming, audio_len)` 按**配置 backend_id + 能力**选后端：配置项支持该模式则用之（百炼离线大文件透明转 filetrans），否则用合理默认。应用层仅依赖 trait + 注册表，新增后端无需改核心（开闭原则）。
 
 **任务 7.4: 连接测试功能**
 - 实现各后端 `validate_config()`；设置面板加"测试连接"按钮。
+- ⚠️ **里程碑顺序冲突（已记录）**：设置面板是 **M11**（§6.4），M7 阶段尚无面板可挂"测试连接"按钮。M7 实现：流式/`generic_ws` 的 `validate_config()` 做**真实 WS 握手测试**（401/403→AuthError）；离线后端暂为 api_key 非空校验。**临时**把主界面「⚙ 设置」按钮用作"测试连接"（测当前 `backend_id`，Toast 反馈），M11 设置面板上线后移到面板内。
 
 #### 验收标准
 - [ ] 可在配置中切换后端（如百炼 → 通用 WebSocket）

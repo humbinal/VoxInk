@@ -265,12 +265,15 @@ impl VoxInk {
         cx.notify();
         window.push_notification("实时识别中…", cx);
 
-        // 后端在 Tokio 运行时执行（WS 需 reactor）；只依赖 trait + 注册表。
+        // 按配置 backend_id 选流式后端（默认百炼实时）；只依赖 trait + 注册表。
+        let streaming_backend_id = resolve_backend_id(&config, true, None);
         handle.spawn(async move {
             let registry = BackendRegistry::with_builtins();
-            let result = match registry.get("aliyun_bailian_streaming") {
+            let result = match registry.get(&streaming_backend_id) {
                 Some(backend) => backend.transcribe_streaming(&config, audio_rx, result_tx).await,
-                None => Err(AsrError::InvalidConfig("未找到实时后端".to_string())),
+                None => Err(AsrError::InvalidConfig(format!(
+                    "未找到后端: {streaming_backend_id}"
+                ))),
             };
             let _ = done_tx.send(result);
         });
@@ -517,8 +520,36 @@ impl VoxInk {
         }
     }
 
-    fn on_open_settings(&mut self, _: &ClickEvent, _: &mut Window, _: &mut Context<Self>) {
-        tracing::info!("设置按钮被点击");
+    fn on_open_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // M7 临时：把「设置」按钮用作"测试连接"（正式设置面板在 M11，§6.4）。
+        let config = self.build_asr_config(cx);
+        let want_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
+        let backend_id = resolve_backend_id(&config, want_streaming, None);
+        let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+            return;
+        };
+        window.push_notification(format!("正在测试连接（{backend_id}）…"), cx);
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            handle.spawn(async move {
+                let registry = BackendRegistry::with_builtins();
+                let result = match registry.get(&backend_id) {
+                    Some(backend) => backend.validate_config(&config).await,
+                    None => Err(AsrError::InvalidConfig("未找到后端".to_string())),
+                };
+                let _ = tx.send(result);
+            });
+            let outcome = rx.await;
+            let _ = this.update_in(cx, |_this, window, cx| match outcome {
+                Ok(Ok(())) => window.push_notification("连接测试成功 ✓", cx),
+                Ok(Err(e)) => {
+                    window.push_notification(format!("连接测试失败：{}", friendly_asr_error(&e)), cx)
+                }
+                Err(_) => window.push_notification("连接测试中断", cx),
+            });
+        })
+        .detach();
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -716,24 +747,59 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 /// 超过则改走大文件异步后端（filetrans + OSS）。
 const SYNC_OFFLINE_MAX_BYTES: usize = 7 * 1024 * 1024;
 
-/// 读取 WAV → 按大小路由到同步/大文件后端 → 转写（在 Tokio 运行时执行）。
+/// 读取 WAV → 按配置 backend_id + 大小选离线后端 → 转写（在 Tokio 运行时执行）。
 async fn run_offline_transcription(
     config: AsrConfig,
     wav_path: PathBuf,
 ) -> Result<String, AsrError> {
     let audio = tokio::fs::read(&wav_path).await?;
-    let backend_id = if audio.len() <= SYNC_OFFLINE_MAX_BYTES {
-        "aliyun_bailian_offline"
-    } else {
-        "aliyun_bailian_filetrans"
-    };
-    tracing::info!(backend_id, bytes = audio.len(), "选择离线转写后端");
+    let backend_id = resolve_backend_id(&config, false, Some(audio.len()));
+    tracing::info!(%backend_id, bytes = audio.len(), "选择离线转写后端");
 
     let registry = BackendRegistry::with_builtins();
     let backend = registry
-        .get(backend_id)
+        .get(&backend_id)
         .ok_or_else(|| AsrError::InvalidConfig(format!("未找到离线后端: {backend_id}")))?;
     backend.transcribe_offline(&config, audio).await
+}
+
+/// 按配置 `backend_id` 与能力（流式/离线）+ 音频大小，解析出实际使用的后端 id。
+/// 仅依赖注册表枚举的能力，新增后端无需改此处（开闭原则，§7.3）。
+fn resolve_backend_id(config: &AsrConfig, want_streaming: bool, audio_len: Option<usize>) -> String {
+    let registry = BackendRegistry::with_builtins();
+    let supports = |id: &str| {
+        registry
+            .get(id)
+            .map(|b| {
+                if want_streaming {
+                    b.supports_streaming()
+                } else {
+                    b.supports_offline()
+                }
+            })
+            .unwrap_or(false)
+    };
+
+    let configured = config.backend_id.trim();
+    if !configured.is_empty() && supports(configured) {
+        // 百炼离线同步后端的大文件特例：透明改用 filetrans。
+        if !want_streaming
+            && configured == "aliyun_bailian_offline"
+            && audio_len.is_some_and(|len| len > SYNC_OFFLINE_MAX_BYTES)
+        {
+            return "aliyun_bailian_filetrans".to_string();
+        }
+        return configured.to_string();
+    }
+
+    // 配置无效/不支持该模式 → 合理默认。
+    if want_streaming {
+        "aliyun_bailian_streaming".to_string()
+    } else if audio_len.is_some_and(|len| len > SYNC_OFFLINE_MAX_BYTES) {
+        "aliyun_bailian_filetrans".to_string()
+    } else {
+        "aliyun_bailian_offline".to_string()
+    }
 }
 
 /// 将转写文本追加到编辑器末尾（离线模式追加，§4.3.1）。

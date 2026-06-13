@@ -30,8 +30,15 @@ pub async fn connect(url: &str, api_key: &str) -> Result<WsStream, AsrError> {
         HeaderValue::from_static("enable"),
     );
 
-    let (stream, _resp) = connect_async(request)
-        .await
-        .map_err(|e| AsrError::WebSocketError(format!("WS 连接失败: {e}")))?;
+    let (stream, _resp) = match connect_async(request).await {
+        Ok(ok) => ok,
+        // 握手返回 401/403 → 鉴权失败（API Key 无效），映射为 AuthError 不重试。
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp))
+            if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 =>
+        {
+            return Err(AsrError::AuthError);
+        }
+        Err(e) => return Err(AsrError::WebSocketError(format!("WS 连接失败: {e}"))),
+    };
     Ok(stream)
 }

@@ -258,10 +258,15 @@ impl VoxInk {
 
     /// 录音按钮点击：Idle 开始录音 / Recording 停止录音（§4.1.2）。
     fn on_toggle_recording(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_recording(window, cx);
+    }
+
+    /// 切换录音状态（供录音按钮与系统托盘菜单调用）。
+    pub fn toggle_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.state.recording_state {
             RecordingState::Idle => self.start_recording(window, cx),
             RecordingState::Recording => self.stop_recording(window, cx, false),
-            // Processing 不可点击，理论上不会到这里。
+            // Processing 不可点击/不可切换，理论上不会到这里。
             RecordingState::Processing => {}
         }
     }

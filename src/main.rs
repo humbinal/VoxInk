@@ -5,13 +5,15 @@
 mod app;
 mod asr;
 mod audio;
+mod autolaunch;
 mod config;
 mod state;
+mod tray;
 
 use anyhow::Result;
 use app::{GlobalConfig, GlobalTokioHandle, VoxInk};
 use config::VoxInkConfig;
-use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, Entity, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 use tracing_subscriber::EnvFilter;
@@ -43,15 +45,21 @@ fn main() -> Result<()> {
 
     // 启动时加载配置（不存在则用默认值；密文 API Key 自动解密为内存明文）。
     let config = VoxInkConfig::load();
+    let first_run = VoxInkConfig::config_path()
+        .map(|p| !p.exists())
+        .unwrap_or(false);
 
     // 首次运行将默认配置落盘，便于用户查看/编辑。
-    if let Ok(path) = VoxInkConfig::config_path()
-        && !path.exists()
-    {
+    if first_run {
         match config.save() {
-            Ok(()) => tracing::info!("已创建默认配置: {}", path.display()),
+            Ok(()) => tracing::info!("已创建默认配置"),
             Err(e) => tracing::error!("写入默认配置失败: {e:#}"),
         }
+    }
+
+    // 同步开机自启状态（M11 设置面板上线前，由配置项 general.launch_at_startup 驱动）。
+    if let Err(e) = autolaunch::set_enabled(config.general.launch_at_startup) {
+        tracing::warn!("同步开机自启状态失败: {e:#}");
     }
 
     let app = gpui_platform::application().with_assets(Assets);
@@ -82,25 +90,41 @@ fn main() -> Result<()> {
         .detach();
 
         let bounds = Bounds::centered(None, size(px(480.), px(600.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("VoxInk".into()),
+        let mut view_holder: Option<Entity<VoxInk>> = None;
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("VoxInk".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                // gpui-component 要求顶层视图包裹在 Root 中（承载弹窗/抽屉/通知层）。
-                let view = cx.new(|cx| VoxInk::new(window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        )
-        .expect("无法创建主窗口");
+                },
+                |window, cx| {
+                    // gpui-component 要求顶层视图包裹在 Root 中（承载弹窗/抽屉/通知层）。
+                    let view = cx.new(|cx| VoxInk::new(window, cx));
+                    view_holder = Some(view.clone());
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            )
+            .expect("无法创建主窗口");
 
         cx.activate(true);
         tracing::info!("主窗口已打开");
+
+        // 系统托盘集成（M5）：图标 + 菜单 + 关闭隐藏到托盘。
+        if let Some(view) = view_holder
+            && let Err(e) = tray::setup_tray(window, view, cx)
+        {
+            tracing::error!("初始化系统托盘失败: {e:#}");
+        }
+
+        // 启动最小化到托盘（首次运行仍显示主窗口，便于初次使用）。
+        if config.general.start_minimized && !first_run {
+            let _ = window.update(cx, |_, win, _| tray::hide_to_tray(win));
+            tracing::info!("按配置启动最小化到托盘");
+        }
     });
 
     Ok(())

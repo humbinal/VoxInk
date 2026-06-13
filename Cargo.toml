@@ -64,5 +64,18 @@ hound = "3"
 rubato = "0.16"
 ringbuf = "0.4"
 
+# 系统集成（§1.4，M5）
+tray-icon = "0.21"
+auto-launch = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+# 窗口隐藏到托盘需直接调用 Win32 ShowWindow（gpui 在 Windows 上不公开 hide/minimize）。
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# 从 gpui Window 取 HWND。
+raw-window-handle = "0.6"
+
 [build-dependencies]
 winresource = "0.1.31"

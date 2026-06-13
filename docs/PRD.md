@@ -324,18 +324,29 @@ pub struct AsrConfig {
 }
 ```
 
+> 📝 **M4 落地扩展（OSS 字段）**：`aliyun_bailian_filetrans`（大文件异步）只接受公网 URL，需先把本地 WAV
+> 上传到用户 OSS。为此 `AsrConfig` 新增四个 OSS 字段（语义不变，仅追加）：`oss_endpoint`、`oss_bucket`、
+> `oss_access_key_id`、`oss_access_key_secret`。M4 阶段由环境变量填充（`OSS_ENDPOINT` / `OSS_BUCKET` /
+> `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET`）；M11 设置面板上线后改由加密配置提供（secret 需加密落盘）。
+
 ### 2.6 后端注册表与内置后端契约
 
 后端通过工厂模式注册，运行时按 `backend_id` 获取实例。注册表的**接口语义**是契约（按 id 注册工厂、按 id 取实例、枚举所有后端及其能力）；其内部数据结构（`HashMap` 等）是实现细节。
 
 **内置后端清单（契约）：**
 
-| 后端 ID                      | 名称           | 类型  | 支持流式 | 支持离线 | 默认启用     | 引入里程碑 |
-|----------------------------|--------------|-----|------|------|----------|-------|
-| `aliyun_bailian_streaming` | 阿里云百炼（实时）    | 云服务 | ✅    | ❌    | ✅        | M6    |
-| `aliyun_bailian_offline`   | 阿里云百炼（离线）    | 云服务 | ❌    | ✅    | ✅        | M4    |
-| `generic_ws`               | 通用 WebSocket | 云服务 | ✅    | ❌    | ✅        | M7    |
-| `qwen_asr_local`           | 本地 qwen-asr  | 本地  | ❌    | ✅    | ❌（需下载模型） | M8    |
+| 后端 ID                      | 名称              | 类型  | 支持流式 | 支持离线 | 默认启用     | 引入里程碑 |
+|----------------------------|-----------------|-----|------|------|----------|-------|
+| `aliyun_bailian_streaming` | 阿里云百炼（实时）       | 云服务 | ✅    | ❌    | ✅        | M6    |
+| `aliyun_bailian_offline`   | 阿里云百炼（离线·同步）    | 云服务 | ❌    | ✅    | ✅        | M4    |
+| `aliyun_bailian_filetrans` | 阿里云百炼（离线·大文件）  | 云服务 | ❌    | ✅    | ✅        | M4    |
+| `generic_ws`               | 通用 WebSocket    | 云服务 | ✅    | ❌    | ✅        | M7    |
+| `qwen_asr_local`           | 本地 qwen-asr     | 本地  | ❌    | ✅    | ❌（需下载模型） | M8    |
+
+> 📝 **M4 落地修订（离线后端拆为同步/大文件两种）**：阿里云百炼无"上传本地字节即同步返回"的单一离线接口。
+> - `aliyun_bailian_offline`：**Qwen3-ASR-Flash** 同步接口，base64 内联本地音频，≤10MB（约 3-4 分钟）。
+> - `aliyun_bailian_filetrans`：**qwen3-asr-flash-filetrans** 异步接口，仅接受公网 URL、不支持本地上传，故需先把 WAV 上传到用户 OSS（私有）→ 预签名 URL → 提交任务 → 轮询 → 取结果。支持超大/超长音频。
+> - 应用层按音频大小路由：≤7MB（原始）走同步，否则走大文件。OSS 凭证经 `AsrConfig` 的 oss_* 字段提供（§2.5 扩展）。
 
 ### 2.7 持久化配置 Schema 契约
 
@@ -985,8 +996,8 @@ ffprobe <生成的 wav 文件>
 
 **任务 4.3: 百炼离线后端（`src/asr/backends/bailian_offline.rs`）**
 - 实现 `AsrBackend`（`supports_offline() == true`，`supports_streaming() == false`）。
-- `transcribe_offline()`：读取 WAV 字节 → 构造请求 → POST 到百炼离线 ASR endpoint → 解析响应提取文本。
-- 接口参考见 [附录 B](#附录-b阿里云百炼-asr-api-参考)。
+- `transcribe_offline()`：读取 WAV 字节 → base64 内联 → POST 到 Qwen3-ASR-Flash 同步接口 → 从 `choices[0].message.content` 取文本。
+- 接口参考见 [附录 B](#附录-b阿里云百炼-asr-api-参考)（**已于 M4 修订**：原 multipart/file_urls 接口不适用，改用 Qwen3-ASR-Flash 同步 base64 接口；§2.7 单一 `api_endpoint` 默认是流式 wss URL，离线后端使用自身 HTTPS 默认端点，仅在用户显式配置 https 端点时覆盖）。
 - ⚠️ 后端内部把 `reqwest` 错误转换为 `AsrError`（见 [§2.4 解耦决策](#24-设计决策错误分类与传输层解耦)）。
 
 **任务 4.4: 异步任务与 UI 联动**
@@ -1001,6 +1012,8 @@ ffprobe <生成的 wav 文件>
 1. 用户已注册阿里云百炼并获取 API Key。
 2. API Key 已填入配置（以加密形式存储）。
 3. Agent 发请求时使用**解密后**的明文 Key。
+
+> 📝 **M4 落地补充**：设置面板（§6.4）在 **M11** 才上线，M4 阶段无 UI 录入 API Key，而配置中的 `api_key` 为机器绑定加密、无法手工编辑。为使 M4 可被验证，离线流程在 `asr.api_key` 为空时**回退读取环境变量 `DASHSCOPE_API_KEY`**（明文不落盘）。验证方式：设置该环境变量后运行（如 PowerShell `$env:DASHSCOPE_API_KEY="sk-..."; cargo run`）。M11 设置面板上线后改为从加密配置读取，env 仅作开发期兜底。
 
 #### 验收标准
 - [ ] `AsrBackend` / `AsrError` / `AsrConfig` / 注册表按 §2 契约落地，编译通过
@@ -1511,9 +1524,21 @@ VoxInk/
 
 - **WebSocket 实时 ASR**：`wss://dashscope.aliyuncs.com/api-ws/v1/inference`
     - 协议：二进制帧 + JSON 控制帧；要求 16kHz/16-bit/单声道 PCM；鉴权 Header `Authorization: Bearer <api_key>`。
-- **HTTP 离线 ASR**：`POST https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription`
-    - 格式：multipart/form-data（音频文件）+ JSON 参数；支持 WAV/MP3/FLAC；最大文件 500MB。
-- 详细文档：https://help.aliyun.com/document_detail/dashscope/
+- **HTTP 离线 ASR（M4 落地修订，2026-06）**：本应用采用 **Qwen3-ASR-Flash** 的 OpenAI 兼容同步接口。
+    - 端点：`POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`
+    - 鉴权：Header `Authorization: Bearer <api_key>`，`Content-Type: application/json`。
+    - 请求体：`{"model":"qwen3-asr-flash","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"data:audio/wav;base64,<BASE64>"}}]}],"stream":false}`（本地音频以 base64 data URL 内联，无需公网 URL）。
+    - 响应：转写文本位于 `choices[0].message.content`。
+    - 限制：单次音频 ≤ 10MB（base64 后），约 3-4 分钟；超长音频改用下面的大文件异步接口。
+- **大文件离线 ASR（qwen3-asr-flash-filetrans，异步，M4 落地）**：仅接受**公网 URL**、不支持本地/base64 上传，故需先上传到用户 OSS。流程：
+    1. **上传 OSS**（私有）：OSS V1 签名 PUT 到 `https://{bucket}.{endpoint}/{key}`；再生成**预签名 GET URL**（`OSSAccessKeyId`/`Expires`/`Signature`）供 DashScope 拉取。
+    2. **提交任务**：`POST https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription`，Header `Authorization: Bearer`、`X-DashScope-Async: enable`；体 `{"model":"qwen3-asr-flash-filetrans","input":{"file_url":"<预签名URL>"},"parameters":{"channel_id":[0],"enable_itn":false}}` → 返回 `output.task_id`。
+    3. **轮询**：`GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}`（Bearer）→ `output.task_status` 为 `SUCCEEDED`/`FAILED`/`PENDING`/`RUNNING`；成功后取 `transcription_url`。
+    4. **取结果**：GET `transcription_url`（24h 有效）→ JSON `{"transcripts":[{"text":"..."}]}`。
+    - 支持超大/超长音频（文档称可达 12 小时）。OSS 对象不自动删除，建议在 OSS 配置生命周期规则定期清理。
+- ⚠️ **原"HTTP 离线 ASR：POST /api/v1/services/audio/asr/transcription（multipart，500MB）"描述不准确**：该路径实际就是上面的**异步、需公网 URL** 接口（提交→轮询→取结果），**不接受本地文件字节的 multipart 同步上传**。因此 §2.2 的 `transcribe_offline(audio_data: Vec<u8>)` 由两个后端落地：短音频走同步 base64（`aliyun_bailian_offline`），大文件走"上传 OSS + 异步"（`aliyun_bailian_filetrans`）。
+- **WebSocket 实时 ASR（M6）**：`wss://dashscope.aliyuncs.com/api-ws/v1/inference`（见上）。
+- 官方文档：录音文件识别（Qwen-ASR）https://help.aliyun.com/zh/model-studio/qwen-asr-api-reference ；实时识别 https://help.aliyun.com/zh/model-studio/qwen-real-time-speech-recognition 。
 
 ### 附录 C：qwen-asr（本地 ASR 引擎）技术约束
 

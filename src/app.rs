@@ -4,6 +4,7 @@
 //! - 一键复制：arboard 写入系统剪贴板，"✓ 已复制" 1.5s 反馈 + Toast。
 //! - 模式切换：同步写入全局配置，退出时持久化。
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -20,6 +21,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{AudioError, Recorder};
 use crate::config::VoxInkConfig;
 use crate::state::{AppState, RecordingState, TranscriptionMode};
@@ -28,6 +30,11 @@ use crate::state::{AppState, RecordingState, TranscriptionMode};
 pub struct GlobalConfig(pub VoxInkConfig);
 
 impl gpui::Global for GlobalConfig {}
+
+/// Tokio 运行时句柄，供把网络任务派发到 Tokio 执行（reqwest 需要 reactor）。
+pub struct GlobalTokioHandle(pub tokio::runtime::Handle);
+
+impl gpui::Global for GlobalTokioHandle {}
 
 /// VoxInk 主窗口视图。
 pub struct VoxInk {
@@ -98,28 +105,111 @@ impl VoxInk {
         }
     }
 
-    /// 停止录音：收尾 WAV，回到 Idle。`auto` 表示是否因超时自动触发。
+    /// 停止录音：收尾 WAV，进入识别阶段。`auto` 表示是否因超时自动触发。
     fn stop_recording(&mut self, window: &mut Window, cx: &mut Context<Self>, auto: bool) {
-        if let Some(recorder) = self.recorder.take() {
-            match recorder.stop() {
-                Ok(outcome) => {
-                    let secs = outcome.duration.as_secs();
-                    let msg = if auto {
-                        format!("已达最长录音时长，已自动停止（{secs}s）")
-                    } else {
-                        format!("录音已停止（{secs}s）")
-                    };
-                    window.push_notification(msg, cx);
+        let Some(recorder) = self.recorder.take() else {
+            self.state.recording_state = RecordingState::Idle;
+            self.state.recording_duration_secs = 0;
+            cx.notify();
+            return;
+        };
+        match recorder.stop() {
+            Ok(outcome) => {
+                if auto {
+                    window.push_notification(
+                        format!(
+                            "已达最长录音时长，已自动停止（{}s）",
+                            outcome.duration.as_secs()
+                        ),
+                        cx,
+                    );
                 }
-                Err(e) => {
-                    tracing::error!("停止录音失败: {e}");
-                    window.push_notification("停止录音时出错", cx);
-                }
+                // 录音完成后自动触发离线转写（任务 4.4）。
+                self.start_transcription(window, cx, outcome.path);
+            }
+            Err(e) => {
+                tracing::error!("停止录音失败: {e}");
+                window.push_notification("停止录音时出错", cx);
+                self.state.recording_state = RecordingState::Idle;
+                self.state.recording_duration_secs = 0;
+                cx.notify();
             }
         }
-        self.state.recording_state = RecordingState::Idle;
-        self.state.recording_duration_secs = 0;
+    }
+
+    /// 进入 Processing 并在 Tokio 后台执行离线转写，结果回主线程追加到编辑器（任务 4.4/4.5）。
+    fn start_transcription(&mut self, window: &mut Window, cx: &mut Context<Self>, wav_path: PathBuf) {
+        self.state.recording_state = RecordingState::Processing;
         cx.notify();
+        window.push_notification("正在识别…", cx);
+
+        let asr_config = self.build_asr_config(cx);
+        let Some(global_handle) = cx.try_global::<GlobalTokioHandle>() else {
+            tracing::error!("缺少 Tokio runtime 句柄，无法转写");
+            self.state.recording_state = RecordingState::Idle;
+            cx.notify();
+            return;
+        };
+        let handle = global_handle.0.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            // 网络请求在 Tokio 运行时执行（reqwest 需 reactor）；结果经 oneshot 回到 GPUI 前台。
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            handle.spawn(async move {
+                let result = run_offline_transcription(asr_config, wav_path).await;
+                let _ = tx.send(result);
+            });
+
+            let outcome = rx.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.state.recording_state = RecordingState::Idle;
+                this.state.recording_duration_secs = 0;
+                match outcome {
+                    Ok(Ok(text)) => {
+                        append_text(&this.editor, &text, window, cx);
+                        window.push_notification("转写完成", cx);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("离线转写失败: {e}");
+                        window.push_notification(friendly_asr_error(&e), cx);
+                    }
+                    Err(_) => {
+                        window.push_notification("转写任务已取消", cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 从持久化配置构造运行期 `AsrConfig`（api_key 为内存中的明文）。
+    fn build_asr_config(&self, cx: &Context<Self>) -> AsrConfig {
+        match cx.try_global::<GlobalConfig>() {
+            Some(global) => {
+                // M11 设置面板上线前，无 UI 录入 API Key；若配置为空则回退到环境变量
+                // DASHSCOPE_API_KEY，便于在当前阶段验证（明文不落盘，符合隐私优先）。
+                let api_key = if global.0.asr.api_key.trim().is_empty() {
+                    std::env::var("DASHSCOPE_API_KEY").unwrap_or_default()
+                } else {
+                    global.0.asr.api_key.clone()
+                };
+                AsrConfig {
+                    backend_id: global.0.asr.backend_id.clone(),
+                    api_key,
+                    api_endpoint: global.0.asr.api_endpoint.clone(),
+                    local_model_path: None,
+                    local_model_size: Some(global.0.asr.local_model_size.clone()),
+                    language: global.0.asr.language.clone(),
+                    // M11 设置面板上线前，OSS 凭证经环境变量提供（大文件 filetrans 用）。
+                    oss_endpoint: std::env::var("OSS_ENDPOINT").unwrap_or_default(),
+                    oss_bucket: std::env::var("OSS_BUCKET").unwrap_or_default(),
+                    oss_access_key_id: std::env::var("OSS_ACCESS_KEY_ID").unwrap_or_default(),
+                    oss_access_key_secret: std::env::var("OSS_ACCESS_KEY_SECRET").unwrap_or_default(),
+                }
+            }
+            None => AsrConfig::default(),
+        }
     }
 
     /// 每秒递增录音时长并刷新 UI；达到上限时自动停止（任务 3.6）。
@@ -409,4 +499,56 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     let mut clipboard = arboard::Clipboard::new().context("打开系统剪贴板失败")?;
     clipboard.set_text(text.to_owned()).context("写入剪贴板失败")?;
     Ok(())
+}
+
+/// 同步接口（qwen3-asr-flash）的原始音频上限：base64 后约 10MB，对应原始约 7MB。
+/// 超过则改走大文件异步后端（filetrans + OSS）。
+const SYNC_OFFLINE_MAX_BYTES: usize = 7 * 1024 * 1024;
+
+/// 读取 WAV → 按大小路由到同步/大文件后端 → 转写（在 Tokio 运行时执行）。
+async fn run_offline_transcription(
+    config: AsrConfig,
+    wav_path: PathBuf,
+) -> Result<String, AsrError> {
+    let audio = tokio::fs::read(&wav_path).await?;
+    let backend_id = if audio.len() <= SYNC_OFFLINE_MAX_BYTES {
+        "aliyun_bailian_offline"
+    } else {
+        "aliyun_bailian_filetrans"
+    };
+    tracing::info!(backend_id, bytes = audio.len(), "选择离线转写后端");
+
+    let registry = BackendRegistry::with_builtins();
+    let backend = registry
+        .get(backend_id)
+        .ok_or_else(|| AsrError::InvalidConfig(format!("未找到离线后端: {backend_id}")))?;
+    backend.transcribe_offline(&config, audio).await
+}
+
+/// 将转写文本追加到编辑器末尾（离线模式追加，§4.3.1）。
+fn append_text(editor: &Entity<InputState>, text: &str, window: &mut Window, cx: &mut Context<VoxInk>) {
+    editor.update(cx, |state, cx| {
+        let mut value = state.value().to_string();
+        if !value.is_empty() {
+            value.push('\n');
+        }
+        value.push_str(text);
+        state.set_value(value, window, cx);
+    });
+}
+
+/// 把 `AsrError` 映射为用户友好的中文提示（任务 4.5）。
+fn friendly_asr_error(error: &AsrError) -> String {
+    match error {
+        AsrError::AuthError => "API Key 无效或未配置，请在设置中检查".to_string(),
+        AsrError::QuotaExceeded(_) => "API 配额已用尽".to_string(),
+        AsrError::Timeout => "转写超时，请检查网络或缩短录音时长".to_string(),
+        AsrError::EmptyResult => "未识别到语音内容".to_string(),
+        AsrError::EmptyAudio => "录音数据为空".to_string(),
+        AsrError::UnsupportedFormat(msg) => msg.clone(),
+        AsrError::NetworkError(_) | AsrError::WebSocketError(_) => {
+            "网络错误，请检查网络连接（录音文件已保留）".to_string()
+        }
+        other => format!("转写失败: {other}"),
+    }
 }

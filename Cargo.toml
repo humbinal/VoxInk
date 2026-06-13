@@ -18,7 +18,16 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 # 异步运行时（§1.4）
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time"] }
+
+# ASR 网络层（§1.4，M4）。rustls-tls：纯 Rust TLS，跨平台无需 OpenSSL/C 工具链。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+async-trait = "0.1"
+serde_json = "1"
+
+# 阿里云 OSS V1 签名（M4 混合：filetrans 大文件需先上传 OSS）。纯 Rust HMAC-SHA1。
+hmac = "0.12"
+sha1 = "0.10"
 
 # 配置与序列化（§1.4）
 serde = { version = "1", features = ["derive"] }

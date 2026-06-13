@@ -3,12 +3,13 @@
 //! 职责：初始化日志、创建 Tokio 运行时、加载/保存配置、启动 GPUI 并打开主窗口（480×600）。
 
 mod app;
+mod asr;
 mod audio;
 mod config;
 mod state;
 
 use anyhow::Result;
-use app::{GlobalConfig, VoxInk};
+use app::{GlobalConfig, GlobalTokioHandle, VoxInk};
 use config::VoxInkConfig;
 use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::Root;
@@ -31,9 +32,12 @@ fn main() -> Result<()> {
 
     // 创建 Tokio 多线程运行时，供后续里程碑（音频 I/O、网络、本地推理）调度耗时任务。
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
         .build()
         .expect("无法创建 Tokio 运行时");
     let _runtime_guard = runtime.enter();
+    // 句柄供 GPUI 处理器把网络任务派发到 Tokio 运行时执行（reqwest 需要 reactor）。
+    let tokio_handle = runtime.handle().clone();
 
     tracing::info!("VoxInk 启动中……");
 
@@ -61,6 +65,7 @@ fn main() -> Result<()> {
 
         // 配置以全局形式承载，供各 View 读写。
         cx.set_global(GlobalConfig(config.clone()));
+        cx.set_global(GlobalTokioHandle(tokio_handle));
 
         // 退出时持久化配置（含已加密的 API Key）。
         cx.on_app_quit(|cx: &mut App| {

@@ -20,6 +20,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::audio::{AudioError, Recorder};
 use crate::config::VoxInkConfig;
 use crate::state::{AppState, RecordingState, TranscriptionMode};
 
@@ -36,6 +37,8 @@ pub struct VoxInk {
     editor: Entity<InputState>,
     /// 复制成功后的短暂反馈标记（1.5s 后复位）。
     copied: bool,
+    /// 当前录音会话（None 表示未在录音）。
+    recorder: Option<Recorder>,
 }
 
 impl VoxInk {
@@ -62,7 +65,90 @@ impl VoxInk {
             state,
             editor,
             copied: false,
+            recorder: None,
         }
+    }
+
+    fn max_recording_seconds(&self, cx: &Context<Self>) -> u32 {
+        cx.try_global::<GlobalConfig>()
+            .map(|g| g.0.asr.max_recording_seconds)
+            .unwrap_or(600)
+    }
+
+    /// 开始录音：构建 Recorder，进入 Recording 状态，启动计时器。
+    fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match Recorder::start() {
+            Ok(recorder) => {
+                self.recorder = Some(recorder);
+                self.state.recording_state = RecordingState::Recording;
+                self.state.recording_duration_secs = 0;
+                tracing::info!("开始录音");
+                cx.notify();
+                let max = self.max_recording_seconds(cx);
+                self.spawn_timer(window, cx, max);
+            }
+            Err(e) => {
+                tracing::error!("启动录音失败: {e}");
+                let msg = match e {
+                    AudioError::NoInputDevice => "未检测到麦克风，请检查录音设备",
+                    _ => "无法开始录音，请重试",
+                };
+                window.push_notification(msg, cx);
+            }
+        }
+    }
+
+    /// 停止录音：收尾 WAV，回到 Idle。`auto` 表示是否因超时自动触发。
+    fn stop_recording(&mut self, window: &mut Window, cx: &mut Context<Self>, auto: bool) {
+        if let Some(recorder) = self.recorder.take() {
+            match recorder.stop() {
+                Ok(outcome) => {
+                    let secs = outcome.duration.as_secs();
+                    let msg = if auto {
+                        format!("已达最长录音时长，已自动停止（{secs}s）")
+                    } else {
+                        format!("录音已停止（{secs}s）")
+                    };
+                    window.push_notification(msg, cx);
+                }
+                Err(e) => {
+                    tracing::error!("停止录音失败: {e}");
+                    window.push_notification("停止录音时出错", cx);
+                }
+            }
+        }
+        self.state.recording_state = RecordingState::Idle;
+        self.state.recording_duration_secs = 0;
+        cx.notify();
+    }
+
+    /// 每秒递增录音时长并刷新 UI；达到上限时自动停止（任务 3.6）。
+    fn spawn_timer(&self, window: &mut Window, cx: &mut Context<Self>, max_secs: u32) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(1))
+                    .await;
+                let stop = this
+                    .update_in(cx, |this, window, cx| {
+                        if this.state.recording_state != RecordingState::Recording {
+                            return true;
+                        }
+                        this.state.recording_duration_secs += 1;
+                        cx.notify();
+                        if this.state.recording_duration_secs >= max_secs {
+                            this.stop_recording(window, cx, true);
+                            return true;
+                        }
+                        false
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// 录音时长格式化为 `MM:SS`。
@@ -80,16 +166,14 @@ impl VoxInk {
         }
     }
 
-    /// 录音按钮点击：Idle → Recording → Idle 切换（§4.1.2；M2 不经过 Processing）。
-    fn on_toggle_recording(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.state.recording_state = match self.state.recording_state {
-            RecordingState::Idle => RecordingState::Recording,
-            RecordingState::Recording => RecordingState::Idle,
+    /// 录音按钮点击：Idle 开始录音 / Recording 停止录音（§4.1.2）。
+    fn on_toggle_recording(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match self.state.recording_state {
+            RecordingState::Idle => self.start_recording(window, cx),
+            RecordingState::Recording => self.stop_recording(window, cx, false),
             // Processing 不可点击，理论上不会到这里。
-            RecordingState::Processing => RecordingState::Processing,
-        };
-        tracing::info!(state = ?self.state.recording_state, "录音状态切换");
-        cx.notify();
+            RecordingState::Processing => {}
+        }
     }
 
     fn on_select_mode(&mut self, mode: TranscriptionMode, cx: &mut Context<Self>) {

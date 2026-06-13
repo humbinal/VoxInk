@@ -49,5 +49,11 @@ base64 = "0.22"
 getrandom = "0.2"
 machine-uid = "0.5"
 
+# 音频采集管线（§1.4，M3）
+cpal = "0.16"
+hound = "3"
+rubato = "0.16"
+ringbuf = "0.4"
+
 [build-dependencies]
 winresource = "0.1.31"

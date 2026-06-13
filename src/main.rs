@@ -3,6 +3,7 @@
 //! 职责：初始化日志、创建 Tokio 运行时、加载/保存配置、启动 GPUI 并打开主窗口（480×600）。
 
 mod app;
+mod audio;
 mod config;
 mod state;
 

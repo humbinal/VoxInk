@@ -27,55 +27,74 @@ pub struct Recorder {
     started_at: Instant,
 }
 
+/// 已就绪的采集句柄：cpal 流（需保持存活）+ 消费端 + 实际输入参数。
+/// WAV 录音（M3）与实时流式（M6）两条路径共用。
+pub(crate) struct OpenCapture {
+    pub stream: cpal::Stream,
+    pub cons: AudioCons,
+    pub input_rate: u32,
+    pub channels: u16,
+}
+
+/// 探测默认输入设备、建环形缓冲、构建并启动采集流。
+pub(crate) fn open_capture() -> Result<OpenCapture, AudioError> {
+    let host = cpal::default_host();
+    let device = host.default_input_device().ok_or(AudioError::NoInputDevice)?;
+    let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+
+    let supported = device
+        .default_input_config()
+        .map_err(|e| AudioError::DefaultConfig(e.to_string()))?;
+    let sample_format = supported.sample_format();
+    let input_rate = supported.sample_rate().0;
+    let channels = supported.channels();
+    let stream_config: cpal::StreamConfig = supported.into();
+
+    // 录制开始时打印实际音频配置与重采样参数（§12.4）。
+    tracing::info!(
+        device = %device_name,
+        ?sample_format,
+        input_rate,
+        channels,
+        target_rate = super::TARGET_SAMPLE_RATE,
+        "开始采集：实际音频输入配置"
+    );
+
+    // 环形缓冲区：约 2 秒输入交织样本（至少 4096）。
+    let capacity = (input_rate as usize * channels as usize * 2).max(4096);
+    let (prod, cons) = new_buffer(capacity);
+    let stream = build_stream(&device, &stream_config, sample_format, prod)?;
+    stream
+        .play()
+        .map_err(|e| AudioError::PlayStream(e.to_string()))?;
+
+    Ok(OpenCapture {
+        stream,
+        cons,
+        input_rate,
+        channels,
+    })
+}
+
 impl Recorder {
-    /// 探测默认输入设备、构建采集流并开始录音。
+    /// 探测默认输入设备、构建采集流并开始录音（WAV）。
     pub fn start() -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or(AudioError::NoInputDevice)?;
-        let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
-
-        let supported = device
-            .default_input_config()
-            .map_err(|e| AudioError::DefaultConfig(e.to_string()))?;
-        let sample_format = supported.sample_format();
-        let input_rate = supported.sample_rate().0;
-        let channels = supported.channels();
-        let stream_config: cpal::StreamConfig = supported.into();
-
-        // 录制开始时打印实际音频配置与重采样参数（§12.4）。
-        tracing::info!(
-            device = %device_name,
-            ?sample_format,
-            input_rate,
-            channels,
-            target_rate = super::TARGET_SAMPLE_RATE,
-            "开始录音：实际音频输入配置"
-        );
-
-        // 环形缓冲区：约 2 秒输入交织样本（至少 4096）。
-        let capacity = (input_rate as usize * channels as usize * 2).max(4096);
-        let (prod, cons) = new_buffer(capacity);
-
+        let cap = open_capture()?;
         let wav_path = temp_wav_path();
         let writer = create_writer(&wav_path)?;
-        let resampler = MonoResampler::new(input_rate)?;
+        let resampler = MonoResampler::new(cap.input_rate)?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let worker = spawn_worker(
-            cons,
+            cap.cons,
             resampler,
             writer,
-            channels as usize,
+            cap.channels as usize,
             stop_flag.clone(),
         );
 
-        let stream = build_stream(&device, &stream_config, sample_format, prod)?;
-        stream
-            .play()
-            .map_err(|e| AudioError::PlayStream(e.to_string()))?;
-
         Ok(Self {
-            stream,
+            stream: cap.stream,
             stop_flag,
             worker: Some(worker),
             wav_path,

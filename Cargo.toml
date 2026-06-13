@@ -18,12 +18,17 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
 # 异步运行时（§1.4）
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "macros"] }
 
 # ASR 网络层（§1.4，M4）。rustls-tls：纯 Rust TLS，跨平台无需 OpenSSL/C 工具链。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 async-trait = "0.1"
 serde_json = "1"
+
+# 实时流式 ASR（§1.4，M6）。WebSocket，rustls 纯 Rust TLS。
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
 
 # 阿里云 OSS V1 签名（M4 混合：filetrans 大文件需先上传 OSS）。纯 Rust HMAC-SHA1。
 hmac = "0.12"
@@ -41,7 +46,7 @@ thiserror = "2"
 anyhow = "1"
 
 # 日期时间（§1.4）
-chrono = { version = "0.4.44", features = ["std", "serde"] }
+chrono = { version = "0.4", features = ["std", "serde"] }
 
 # 配置持久化（§2.7, §8）
 toml = "0.8"
@@ -78,4 +83,4 @@ windows = { version = "0.61", features = [
 raw-window-handle = "0.6"
 
 [build-dependencies]
-winresource = "0.1.31"
+winresource = "0.1"

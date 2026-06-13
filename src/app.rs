@@ -21,8 +21,9 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
-use crate::audio::{AudioError, Recorder};
+use crate::audio::{AudioError, Recorder, StreamingCapture};
 use crate::config::VoxInkConfig;
 use crate::state::{AppState, RecordingState, TranscriptionMode};
 
@@ -44,8 +45,17 @@ pub struct VoxInk {
     editor: Entity<InputState>,
     /// 复制成功后的短暂反馈标记（1.5s 后复位）。
     copied: bool,
-    /// 当前录音会话（None 表示未在录音）。
+    /// 当前离线录音会话（None 表示未在录音）。
     recorder: Option<Recorder>,
+    /// 当前实时流式会话（None 表示未在流式录音）。
+    streaming: Option<StreamingSession>,
+    /// 实时识别失败后是否已切换到"停止后离线转写"。
+    streaming_fallback: bool,
+}
+
+/// 实时流式会话：持有流式采集句柄（cpal 流在主线程）。
+struct StreamingSession {
+    capture: StreamingCapture,
 }
 
 impl VoxInk {
@@ -73,6 +83,8 @@ impl VoxInk {
             editor,
             copied: false,
             recorder: None,
+            streaming: None,
+            streaming_fallback: false,
         }
     }
 
@@ -212,6 +224,171 @@ impl VoxInk {
         }
     }
 
+    // ───────────────────────────── 实时流式（M6）─────────────────────────────
+
+    /// 开始实时流式识别：流式采集 + WS 后端 + 增量结果回 UI。
+    fn start_streaming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let config = self.build_asr_config(cx);
+        if config.api_key.trim().is_empty() {
+            window.push_notification(
+                "未配置 API Key（设置环境变量 DASHSCOPE_API_KEY 或在设置中填写）",
+                cx,
+            );
+            return;
+        }
+        let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+            tracing::error!("缺少 Tokio runtime 句柄，无法实时识别");
+            return;
+        };
+
+        let (audio_tx, audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<StreamingResult>(64);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<(), AsrError>>();
+
+        let capture = match StreamingCapture::start(audio_tx) {
+            Ok(capture) => capture,
+            Err(e) => {
+                tracing::error!("启动流式采集失败: {e}");
+                let msg = match e {
+                    AudioError::NoInputDevice => "未检测到麦克风，请检查录音设备",
+                    _ => "无法开始录音，请重试",
+                };
+                window.push_notification(msg, cx);
+                return;
+            }
+        };
+        self.streaming = Some(StreamingSession { capture });
+        self.streaming_fallback = false;
+        self.state.recording_state = RecordingState::Recording;
+        self.state.recording_duration_secs = 0;
+        self.state.pending_text.clear();
+        cx.notify();
+        window.push_notification("实时识别中…", cx);
+
+        // 后端在 Tokio 运行时执行（WS 需 reactor）；只依赖 trait + 注册表。
+        handle.spawn(async move {
+            let registry = BackendRegistry::with_builtins();
+            let result = match registry.get("aliyun_bailian_streaming") {
+                Some(backend) => backend.transcribe_streaming(&config, audio_rx, result_tx).await,
+                None => Err(AsrError::InvalidConfig("未找到实时后端".to_string())),
+            };
+            let _ = done_tx.send(result);
+        });
+
+        let max = self.max_recording_seconds(cx);
+        self.spawn_timer(window, cx, max);
+
+        // 前台读取增量结果并更新 UI；通道关闭后取后端最终状态。
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(result) = result_rx.recv().await {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.apply_streaming_result(result, window, cx);
+                });
+            }
+            let done = done_rx
+                .await
+                .unwrap_or_else(|_| Err(AsrError::WebSocketError("任务通道中断".to_string())));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.on_streaming_backend_done(done, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 停止实时流式：收尾 WAV → 已失败则离线转写，否则等待最终结果。
+    fn stop_streaming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.streaming.take() else {
+            self.finish_to_idle(cx);
+            return;
+        };
+        match session.capture.stop() {
+            Ok(outcome) => {
+                self.state.recording_state = RecordingState::Processing;
+                self.state.recording_duration_secs = 0;
+                cx.notify();
+                if self.streaming_fallback {
+                    window.push_notification("实时识别失败，正在离线转写…", cx);
+                    self.start_transcription(window, cx, outcome.path);
+                } else {
+                    // 关闭音频通道触发后端 finish-task → 最终结果 → done（转 Idle）。
+                    window.push_notification("正在生成最终结果…", cx);
+                }
+            }
+            Err(e) => {
+                tracing::error!("停止流式采集失败: {e}");
+                window.push_notification("停止录音时出错", cx);
+                self.finish_to_idle(cx);
+            }
+        }
+    }
+
+    /// 应用一条增量识别结果（§4.2.1）。
+    fn apply_streaming_result(
+        &mut self,
+        result: StreamingResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if result.is_final {
+            // 整句稳定：固化到编辑器，清空 pending。
+            append_text(&self.editor, &result.delta_text, window, cx);
+            self.state.pending_text.clear();
+        } else {
+            // 未稳定：替换 pending（DashScope 发整句而非增量）。
+            self.state.pending_text = result.delta_text;
+        }
+        cx.notify();
+    }
+
+    /// 后端结束处理：成功转 Idle；鉴权失败提示；其它失败标记回退离线。
+    fn on_streaming_backend_done(
+        &mut self,
+        done: Result<(), AsrError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 提交残留的未固化 pending。
+        if !self.state.pending_text.is_empty() {
+            let pending = std::mem::take(&mut self.state.pending_text);
+            append_text(&self.editor, &pending, window, cx);
+        }
+
+        match done {
+            Ok(()) => {
+                window.push_notification("识别完成", cx);
+                self.finish_to_idle(cx);
+            }
+            Err(AsrError::AuthError) => {
+                if let Some(session) = self.streaming.take() {
+                    let _ = session.capture.stop();
+                }
+                window.push_notification("API Key 无效，请检查后重试", cx);
+                self.finish_to_idle(cx);
+            }
+            Err(e) => {
+                tracing::warn!("实时识别失败: {e}");
+                self.streaming_fallback = true;
+                if self.streaming.is_some() {
+                    // 用户仍在录音：保持录制，停止后用完整 WAV 离线转写。
+                    window.push_notification("实时识别失败，已切换离线，停止后将转写", cx);
+                    cx.notify();
+                } else {
+                    self.finish_to_idle(cx);
+                }
+            }
+        }
+    }
+
+    /// 复位到 Idle 并清理流式状态。
+    fn finish_to_idle(&mut self, cx: &mut Context<Self>) {
+        self.state.recording_state = RecordingState::Idle;
+        self.state.recording_duration_secs = 0;
+        self.state.pending_text.clear();
+        self.streaming = None;
+        self.streaming_fallback = false;
+        cx.notify();
+    }
+
     /// 每秒递增录音时长并刷新 UI；达到上限时自动停止（任务 3.6）。
     fn spawn_timer(&self, window: &mut Window, cx: &mut Context<Self>, max_secs: u32) {
         cx.spawn_in(window, async move |this, cx| {
@@ -227,7 +404,7 @@ impl VoxInk {
                         this.state.recording_duration_secs += 1;
                         cx.notify();
                         if this.state.recording_duration_secs >= max_secs {
-                            this.stop_recording(window, cx, true);
+                            this.stop_capture(window, cx, true);
                             return true;
                         }
                         false
@@ -264,10 +441,28 @@ impl VoxInk {
     /// 切换录音状态（供录音按钮与系统托盘菜单调用）。
     pub fn toggle_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.state.recording_state {
-            RecordingState::Idle => self.start_recording(window, cx),
-            RecordingState::Recording => self.stop_recording(window, cx, false),
+            RecordingState::Idle => self.start_capture(window, cx),
+            RecordingState::Recording => self.stop_capture(window, cx, false),
             // Processing 不可点击/不可切换，理论上不会到这里。
             RecordingState::Processing => {}
+        }
+    }
+
+    /// 按当前模式开始：实时 → 流式；离线 → 录 WAV。
+    fn start_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.transcription_mode == TranscriptionMode::Streaming {
+            self.start_streaming(window, cx);
+        } else {
+            self.start_recording(window, cx);
+        }
+    }
+
+    /// 停止：有流式会话 → 停流式；否则停离线录音。
+    fn stop_capture(&mut self, window: &mut Window, cx: &mut Context<Self>, auto: bool) {
+        if self.streaming.is_some() {
+            self.stop_streaming(window, cx);
+        } else {
+            self.stop_recording(window, cx, auto);
         }
     }
 
@@ -443,6 +638,17 @@ impl VoxInk {
                     .child(status_text)
                     .child(self.duration_label()),
             )
+            // 实时识别未稳定文本（pending）：浅色显示以区分稳定结果（§4.2.1）。
+            .when(!self.state.pending_text.is_empty(), |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("✍ {}", self.state.pending_text)),
+                )
+            })
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {

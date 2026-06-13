@@ -8,6 +8,7 @@
 
 pub mod buffer;
 pub mod capture;
+pub mod chunk_sender;
 pub mod resample;
 pub mod writer;
 
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub use capture::Recorder;
+pub use chunk_sender::StreamingCapture;
 
 /// ASR 与本地引擎统一要求的目标采样率（§4.2.3 / §4.1）。
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;

@@ -1543,8 +1543,12 @@ VoxInk/
     4. **取结果**：GET `transcription_url`（24h 有效）→ JSON `{"transcripts":[{"text":"..."}]}`。
     - 支持超大/超长音频（文档称可达 12 小时）。OSS 对象不自动删除，建议在 OSS 配置生命周期规则定期清理。
 - ⚠️ **原"HTTP 离线 ASR：POST /api/v1/services/audio/asr/transcription（multipart，500MB）"描述不准确**：该路径实际就是上面的**异步、需公网 URL** 接口（提交→轮询→取结果），**不接受本地文件字节的 multipart 同步上传**。因此 §2.2 的 `transcribe_offline(audio_data: Vec<u8>)` 由两个后端落地：短音频走同步 base64（`aliyun_bailian_offline`），大文件走"上传 OSS + 异步"（`aliyun_bailian_filetrans`）。
-- **WebSocket 实时 ASR（M6）**：`wss://dashscope.aliyuncs.com/api-ws/v1/inference`（见上）。
-- 官方文档：录音文件识别（Qwen-ASR）https://help.aliyun.com/zh/model-studio/qwen-asr-api-reference ；实时识别 https://help.aliyun.com/zh/model-studio/qwen-real-time-speech-recognition 。
+- **WebSocket 实时 ASR（M6 落地，已核对协议）**：模型 **paraformer-realtime-v2**，端点 `wss://dashscope.aliyuncs.com/api-ws/v1/inference`，Header `Authorization: Bearer <key>`。
+    - 流程：连接 → 发 `run-task`（JSON：`header.action="run-task"`、`task_id`(uuid)、`streaming="duplex"`；`payload` 含 `task_group="audio"`/`task="asr"`/`function="recognition"`/`model`/`parameters{format:"pcm",sample_rate:16000,language_hints}`/`input{}`）→ 收 `task-started` → 发**二进制** PCM 帧（16kHz/16-bit/mono，推荐每 100ms 一帧）。
+    - 收 `result-generated`：识别文本在 `payload.output.sentence.text`，整句结束标志 `payload.output.sentence.sentence_end`（true 固化，false 为中间结果），`heartbeat=true` 忽略。
+    - 停止：发 `finish-task` → 收 `task-finished`。错误：`task-failed`（`header.error_code`/`error_message`）。
+    - 实现：断开自动重连（≤3 次，1/2/4s 退避；音频在 MPSC 通道缓冲不丢）；全部失败回退离线（流式采集**同时写本地 WAV**，停止后离线转写）。
+- 官方文档：录音文件识别（Qwen-ASR）https://help.aliyun.com/zh/model-studio/qwen-asr-api-reference ；实时识别 https://www.alibabacloud.com/help/zh/model-studio/websocket-for-paraformer-real-time-service 。
 
 ### 附录 C：qwen-asr（本地 ASR 引擎）技术约束
 

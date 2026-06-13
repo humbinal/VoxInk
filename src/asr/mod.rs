@@ -10,6 +10,7 @@ pub mod error;
 pub mod oss;
 pub mod registry;
 pub mod traits;
+pub mod websocket;
 
 pub use config::AsrConfig;
 pub use error::AsrError;

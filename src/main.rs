@@ -1,6 +1,6 @@
 //! VoxInk 应用入口 —— M1 任务 1.3；M2 任务 2.3（配置生命周期）。
 //!
-//! 职责：初始化日志、创建 Tokio 运行时、加载/保存配置、启动 GPUI 并打开主窗口（480×600）。
+//! 职责：初始化日志、创建 Tokio 运行时、加载/保存配置、启动 GPUI 并打开主窗口（800×600）。
 
 mod app;
 mod asr;
@@ -9,7 +9,6 @@ mod autolaunch;
 mod config;
 mod history;
 mod hotkey;
-mod session;
 mod state;
 mod tray;
 
@@ -106,7 +105,15 @@ fn main() -> Result<()> {
         })
             .detach();
 
-        let bounds = Bounds::centered(None, size(px(480.), px(600.)), cx);
+        // 窗口尺寸取自配置（无配置文件用默认值，§6.1）。
+        let bounds = Bounds::centered(
+            None,
+            size(
+                px(config.window.width as f32),
+                px(config.window.height as f32),
+            ),
+            cx,
+        );
         let mut view_holder: Option<Entity<VoxInk>> = None;
         let window = cx
             .open_window(

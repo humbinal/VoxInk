@@ -1,13 +1,11 @@
-//! 本地历史数据库（M10 任务 10.1）。
+//! 本地历史数据库（M10，2026-06-14 重设计为单表 records 文档模型）。
 //!
-//! 📐 表结构契约见 §2.8：`sessions` / `transcriptions` / FTS5 `transcriptions_fts`。
-//! 用 `rusqlite`（bundled，编译期含 FTS5）。连接在 GPUI 主线程持有（`!Sync`，但本地
-//! SQLite 操作极快，不阻塞 UI；不为此引入后台 DB 线程，避免过度设计）。
+//! 📐 表结构契约见 §2.8：单表 `records`（每条即左栏一个可编辑/可续录文档）+ FTS5 `records_fts`。
+//! 用 `rusqlite`（bundled，编译期含 FTS5）。连接在 GPUI 主线程持有（`!Sync`，本地 SQLite 操作
+//! 极快不阻塞 UI；不为此引入后台 DB 线程，避免过度设计）。
 //!
-//! 📝 落地说明（与 §2.8 的关系）：契约只规定 3 张表。为让外部内容 FTS5 与
-//! `transcriptions` 保持同步，需配套 INSERT/DELETE/UPDATE 触发器（实现细节）。
-//! 另外 FTS5 默认 unicode61 分词器对中文（无空格）几乎不分词，子串检索无效；故 FTS 表
-//! 采用 `tokenize='trigram'`，使中文也能子串全文检索——语义不变（仍是 transcriptions 的全文索引）。
+//! 📝 FTS5 落地：外部内容 FTS5 需配套 INSERT/DELETE/UPDATE 触发器与 `records` 同步；并用
+//! `tokenize='trigram'`，否则默认 unicode61 对无空格中文几乎不分词、子串检索失效。
 
 use std::path::PathBuf;
 
@@ -18,19 +16,24 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::session::{SessionRecord, DEFAULT_SESSION_NAME};
+/// 新建空记录的默认标题。
+pub const NEW_RECORD_TITLE: &str = "新记录";
 
-/// 转录记录（对应 §2.8 `transcriptions` 表）。
+/// 由正文派生标题时保留的最大字符数（超出加省略号）。
+const TITLE_MAX_CHARS: usize = 50;
+
+/// 一条识别记录文档（对应 §2.8 `records` 表）。
 #[derive(Debug, Clone, Serialize)]
-pub struct TranscriptionRecord {
+pub struct Record {
     pub id: String,
-    pub session_id: String,
-    /// "streaming" | "offline" | "local"（§2.8）。
+    pub title: String,
+    pub text: String,
+    /// 最近一次录制模式 "streaming" | "offline"；空文档为 ""。
     pub mode: String,
     pub duration_secs: u32,
-    pub text: String,
-    /// RFC3339 UTC 时间戳。
+    /// RFC3339 UTC。
     pub created_at: String,
+    pub updated_at: String,
 }
 
 /// 历史数据库句柄。
@@ -69,37 +72,28 @@ impl HistoryDb {
         self.conn
             .execute_batch(
                 r#"
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id          TEXT PRIMARY KEY,
-                    name        TEXT NOT NULL,
-                    created_at  TEXT NOT NULL,
-                    updated_at  TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS transcriptions (
+                CREATE TABLE IF NOT EXISTS records (
                     id            TEXT PRIMARY KEY,
-                    session_id    TEXT NOT NULL,
+                    title         TEXT NOT NULL,
+                    text          TEXT NOT NULL,
                     mode          TEXT NOT NULL,
                     duration_secs INTEGER NOT NULL,
-                    text          TEXT NOT NULL,
                     created_at    TEXT NOT NULL,
-                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                    updated_at    TEXT NOT NULL
                 );
 
-                CREATE VIRTUAL TABLE IF NOT EXISTS transcriptions_fts
-                    USING fts5(text, content=transcriptions, content_rowid=rowid, tokenize='trigram');
+                CREATE VIRTUAL TABLE IF NOT EXISTS records_fts
+                    USING fts5(text, content=records, content_rowid=rowid, tokenize='trigram');
 
-                CREATE TRIGGER IF NOT EXISTS transcriptions_ai AFTER INSERT ON transcriptions BEGIN
-                    INSERT INTO transcriptions_fts(rowid, text) VALUES (new.rowid, new.text);
+                CREATE TRIGGER IF NOT EXISTS records_ai AFTER INSERT ON records BEGIN
+                    INSERT INTO records_fts(rowid, text) VALUES (new.rowid, new.text);
                 END;
-                CREATE TRIGGER IF NOT EXISTS transcriptions_ad AFTER DELETE ON transcriptions BEGIN
-                    INSERT INTO transcriptions_fts(transcriptions_fts, rowid, text)
-                        VALUES ('delete', old.rowid, old.text);
+                CREATE TRIGGER IF NOT EXISTS records_ad AFTER DELETE ON records BEGIN
+                    INSERT INTO records_fts(records_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
                 END;
-                CREATE TRIGGER IF NOT EXISTS transcriptions_au AFTER UPDATE ON transcriptions BEGIN
-                    INSERT INTO transcriptions_fts(transcriptions_fts, rowid, text)
-                        VALUES ('delete', old.rowid, old.text);
-                    INSERT INTO transcriptions_fts(rowid, text) VALUES (new.rowid, new.text);
+                CREATE TRIGGER IF NOT EXISTS records_au AFTER UPDATE ON records BEGIN
+                    INSERT INTO records_fts(records_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+                    INSERT INTO records_fts(rowid, text) VALUES (new.rowid, new.text);
                 END;
                 "#,
             )
@@ -107,179 +101,137 @@ impl HistoryDb {
         Ok(())
     }
 
-    // ───────────────────────────── 会话（任务 10.3）─────────────────────────────
+    // ───────────────────────────── 记录 CRUD ─────────────────────────────
 
-    /// 确保存在默认会话；返回应作为"当前会话"的会话（最近更新的，否则默认）。
-    pub fn ensure_default_session(&self) -> Result<SessionRecord> {
-        let existing = self.list_sessions()?;
-        if let Some(latest) = existing.into_iter().next() {
-            return Ok(latest);
-        }
-        self.create_session(DEFAULT_SESSION_NAME)
-    }
-
-    /// 创建命名会话，返回新记录。
-    pub fn create_session(&self, name: &str) -> Result<SessionRecord> {
+    /// 新建一条空记录文档，返回其记录。
+    pub fn create_record(&self) -> Result<Record> {
         let now = Utc::now().to_rfc3339();
-        let rec = SessionRecord {
-            id: new_id(),
-            name: name.to_string(),
+        let rec = Record {
+            id: Uuid::new_v4().to_string(),
+            title: NEW_RECORD_TITLE.to_string(),
+            text: String::new(),
+            mode: String::new(),
+            duration_secs: 0,
             created_at: now.clone(),
             updated_at: now,
         };
         self.conn
             .execute(
-                "INSERT INTO sessions (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![rec.id, rec.name, rec.created_at, rec.updated_at],
+                "INSERT INTO records (id, title, text, mode, duration_secs, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    rec.id,
+                    rec.title,
+                    rec.text,
+                    rec.mode,
+                    rec.duration_secs,
+                    rec.created_at,
+                    rec.updated_at
+                ],
             )
-            .context("创建会话失败")?;
+            .context("创建记录失败")?;
         Ok(rec)
     }
 
-    /// 列出全部会话，按更新时间倒序（最近的在前）。
-    pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(SessionRecord {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    created_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("查询会话列表失败")?;
-        Ok(rows)
-    }
-
-    /// 删除会话及其全部转录。
-    pub fn delete_session(&self, session_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM transcriptions WHERE session_id = ?1",
-                params![session_id],
-            )
-            .context("删除会话转录失败")?;
-        self.conn
-            .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
-            .context("删除会话失败")?;
-        Ok(())
-    }
-
-    /// 更新会话 updated_at 为当前时间（新增转录时调用，使其排到最前）。
-    pub fn touch_session(&self, session_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
-                params![session_id, Utc::now().to_rfc3339()],
-            )
-            .context("更新会话时间失败")?;
-        Ok(())
-    }
-
-    // ───────────────────────────── 转录（任务 10.1）─────────────────────────────
-
-    /// 插入一条转录记录，返回其生成的 id。
-    pub fn insert_transcription(
+    /// 保存记录正文（更新 text/title/mode/duration/updated_at）。
+    /// 标题由正文首行派生；空正文回退到 [`NEW_RECORD_TITLE`]。
+    pub fn save_record(
         &self,
-        session_id: &str,
+        id: &str,
+        text: &str,
         mode: &str,
         duration_secs: u32,
-        text: &str,
-    ) -> Result<String> {
-        let id = new_id();
-        let created_at = Utc::now().to_rfc3339();
+    ) -> Result<()> {
+        let title = derive_title(text);
         self.conn
             .execute(
-                "INSERT INTO transcriptions (id, session_id, mode, duration_secs, text, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, session_id, mode, duration_secs, text, created_at],
+                "UPDATE records SET text = ?2, title = ?3, mode = ?4, duration_secs = ?5, updated_at = ?6
+                 WHERE id = ?1",
+                params![id, text, title, mode, duration_secs, Utc::now().to_rfc3339()],
             )
-            .context("保存转录记录失败")?;
-        Ok(id)
+            .context("保存记录失败")?;
+        Ok(())
     }
 
-    /// 列出某会话的转录，按创建时间倒序。
-    pub fn list_transcriptions(&self, session_id: &str) -> Result<Vec<TranscriptionRecord>> {
+    /// 读取单条记录。
+    pub fn get_record(&self, id: &str) -> Result<Option<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, mode, duration_secs, text, created_at
-             FROM transcriptions WHERE session_id = ?1 ORDER BY created_at DESC",
+            "SELECT id, title, text, mode, duration_secs, created_at, updated_at
+             FROM records WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], map_record)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r.context("读取记录失败")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 列出全部记录，按 `created_at` 倒序（最新创建的在前；顺序稳定，不因编辑/续录而跳变）。
+    pub fn list_records(&self) -> Result<Vec<Record>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, text, mode, duration_secs, created_at, updated_at
+             FROM records ORDER BY created_at DESC",
         )?;
         let rows = stmt
-            .query_map(params![session_id], map_transcription)?
+            .query_map([], map_record)?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("查询转录列表失败")?;
+            .context("查询记录列表失败")?;
         Ok(rows)
     }
 
-    /// 在某会话内全文检索转录（FTS5 trigram）。短于 3 字符的查询退化为 LIKE 子串匹配
-    /// （trigram 至少需 3 字符成一组），保证任意长度查询都有结果。
-    pub fn search_transcriptions(
-        &self,
-        session_id: &str,
-        query: &str,
-    ) -> Result<Vec<TranscriptionRecord>> {
+    /// 最近一条记录（用于启动默认打开）。
+    pub fn most_recent(&self) -> Result<Option<Record>> {
+        Ok(self.list_records()?.into_iter().next())
+    }
+
+    /// 删除单条记录。
+    pub fn delete_record(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM records WHERE id = ?1", params![id])
+            .context("删除记录失败")?;
+        Ok(())
+    }
+
+    /// 全文检索记录（FTS5 trigram）。短于 3 字符的查询退化为 LIKE 子串匹配
+    /// （trigram 至少需 3 字符成一组）。空查询返回全部。结果按 `created_at` 倒序。
+    pub fn search_records(&self, query: &str) -> Result<Vec<Record>> {
         let q = query.trim();
         if q.is_empty() {
-            return self.list_transcriptions(session_id);
+            return self.list_records();
         }
 
         if q.chars().count() < 3 {
             let like = format!("%{}%", escape_like(q));
             let mut stmt = self.conn.prepare(
-                "SELECT id, session_id, mode, duration_secs, text, created_at
-                 FROM transcriptions
-                 WHERE session_id = ?1 AND text LIKE ?2 ESCAPE '\\'
-                 ORDER BY created_at DESC",
+                "SELECT id, title, text, mode, duration_secs, created_at, updated_at
+                 FROM records WHERE text LIKE ?1 ESCAPE '\\' ORDER BY created_at DESC",
             )?;
             let rows = stmt
-                .query_map(params![session_id, like], map_transcription)?
+                .query_map(params![like], map_record)?
                 .collect::<rusqlite::Result<Vec<_>>>()
-                .context("搜索转录失败")?;
+                .context("搜索记录失败")?;
             return Ok(rows);
         }
 
         // 将用户输入整体作为一个字符串字面量（转义内部双引号），避免 FTS5 查询语法报错。
         let match_query = format!("\"{}\"", q.replace('"', "\"\""));
         let mut stmt = self.conn.prepare(
-            "SELECT t.id, t.session_id, t.mode, t.duration_secs, t.text, t.created_at
-             FROM transcriptions_fts
-             JOIN transcriptions t ON t.rowid = transcriptions_fts.rowid
-             WHERE transcriptions_fts MATCH ?1 AND t.session_id = ?2
-             ORDER BY t.created_at DESC",
+            "SELECT r.id, r.title, r.text, r.mode, r.duration_secs, r.created_at, r.updated_at
+             FROM records_fts
+             JOIN records r ON r.rowid = records_fts.rowid
+             WHERE records_fts MATCH ?1
+             ORDER BY r.created_at DESC",
         )?;
         let rows = stmt
-            .query_map(params![match_query, session_id], map_transcription)?
+            .query_map(params![match_query], map_record)?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("全文检索转录失败")?;
+            .context("全文检索记录失败")?;
         Ok(rows)
-    }
-
-    /// 删除单条转录。
-    pub fn delete_transcription(&self, id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM transcriptions WHERE id = ?1", params![id])
-            .context("删除转录失败")?;
-        Ok(())
-    }
-
-    /// 清空某会话的全部转录。
-    pub fn clear_session_transcriptions(&self, session_id: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM transcriptions WHERE session_id = ?1",
-                params![session_id],
-            )
-            .context("清空会话转录失败")?;
-        Ok(())
     }
 
     // ───────────────────────────── 保留与导出（任务 10.4）─────────────────────────────
 
-    /// 删除早于 `days` 天的转录；返回删除条数。`days == 0` 表示不清理。
+    /// 删除 `updated_at` 早于 `days` 天的记录；返回删除条数。`days == 0` 表示不清理。
     pub fn purge_older_than(&self, days: u32) -> Result<usize> {
         if days == 0 {
             return Ok(0);
@@ -288,52 +240,53 @@ impl HistoryDb {
         let n = self
             .conn
             .execute(
-                "DELETE FROM transcriptions WHERE created_at < ?1",
+                "DELETE FROM records WHERE updated_at < ?1",
                 params![cutoff],
             )
-            .context("清理过期历史失败")?;
+            .context("清理过期记录失败")?;
         Ok(n)
     }
 
-    /// 导出全部会话及其转录为 JSON 值（任务 10.4）。
+    /// 导出全部记录为 JSON 值（任务 10.4）。
     pub fn export_json(&self) -> Result<serde_json::Value> {
-        let sessions = self.list_sessions()?;
-        let mut out = Vec::with_capacity(sessions.len());
-        for s in sessions {
-            let transcriptions = self.list_transcriptions(&s.id)?;
-            out.push(serde_json::json!({
-                "id": s.id,
-                "name": s.name,
-                "created_at": s.created_at,
-                "updated_at": s.updated_at,
-                "transcriptions": transcriptions,
-            }));
-        }
+        let records = self.list_records()?;
         Ok(serde_json::json!({
             "exported_at": Utc::now().to_rfc3339(),
-            "sessions": out,
+            "records": records,
         }))
     }
 }
 
-fn map_transcription(row: &rusqlite::Row) -> rusqlite::Result<TranscriptionRecord> {
-    Ok(TranscriptionRecord {
+fn map_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
+    Ok(Record {
         id: row.get(0)?,
-        session_id: row.get(1)?,
-        mode: row.get(2)?,
-        duration_secs: row.get::<_, i64>(3)? as u32,
-        text: row.get(4)?,
+        title: row.get(1)?,
+        text: row.get(2)?,
+        mode: row.get(3)?,
+        duration_secs: row.get::<_, i64>(4)? as u32,
         created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
+}
+
+/// 由正文派生标题：折叠换行/连续空白为单空格，取开头 [`TITLE_MAX_CHARS`] 个字符（超出加省略号）；
+/// 空正文回退默认标题。
+fn derive_title(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return NEW_RECORD_TITLE.to_string();
+    }
+    let title: String = flat.chars().take(TITLE_MAX_CHARS).collect();
+    if flat.chars().count() > TITLE_MAX_CHARS {
+        format!("{title}…")
+    } else {
+        title
+    }
 }
 
 /// 转义 LIKE 通配符，配合 `ESCAPE '\'`。
 fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-}
-
-fn new_id() -> String {
-    Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
@@ -345,69 +298,92 @@ mod tests {
     }
 
     #[test]
-    fn session_crud_and_default() {
+    fn create_save_get_record() {
         let db = mem_db();
-        let s = db.ensure_default_session().unwrap();
-        assert_eq!(s.name, DEFAULT_SESSION_NAME);
-        // ensure_default 再次调用返回已存在的会话，不重复创建。
-        let again = db.ensure_default_session().unwrap();
-        assert_eq!(again.id, s.id);
-        assert_eq!(db.list_sessions().unwrap().len(), 1);
+        let rec = db.create_record().unwrap();
+        assert_eq!(rec.title, NEW_RECORD_TITLE);
+        assert!(rec.text.is_empty());
 
-        let s2 = db.create_session("工作").unwrap();
-        assert_eq!(db.list_sessions().unwrap().len(), 2);
-        db.delete_session(&s2.id).unwrap();
-        assert_eq!(db.list_sessions().unwrap().len(), 1);
+        db.save_record(&rec.id, "帮我写一段周报\n第二行", "offline", 12)
+            .unwrap();
+        let got = db.get_record(&rec.id).unwrap().unwrap();
+        assert_eq!(got.text, "帮我写一段周报\n第二行");
+        assert_eq!(got.title, "帮我写一段周报 第二行"); // 折叠换行后取开头 50 字
+        assert_eq!(got.mode, "offline");
+        assert_eq!(got.duration_secs, 12);
     }
 
     #[test]
-    fn insert_list_delete_transcription() {
+    fn title_capped_at_50_chars() {
         let db = mem_db();
-        let s = db.ensure_default_session().unwrap();
-        db.insert_transcription(&s.id, "offline", 12, "你好世界")
-            .unwrap();
-        let id2 = db
-            .insert_transcription(&s.id, "streaming", 5, "测试录音")
-            .unwrap();
-        let list = db.list_transcriptions(&s.id).unwrap();
+        let r = db.create_record().unwrap();
+        let long: String = "字".repeat(60);
+        db.save_record(&r.id, &long, "offline", 0).unwrap();
+        let title = db.get_record(&r.id).unwrap().unwrap().title;
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1); // 50 + 省略号
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn list_orders_by_created_desc_stable() {
+        let db = mem_db();
+        let a = db.create_record().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = db.create_record().unwrap();
+
+        // 按 created_at 倒序：后建的 b 在前。
+        let list = db.list_records().unwrap();
         assert_eq!(list.len(), 2);
-        db.delete_transcription(&id2).unwrap();
-        assert_eq!(db.list_transcriptions(&s.id).unwrap().len(), 1);
-        db.clear_session_transcriptions(&s.id).unwrap();
-        assert!(db.list_transcriptions(&s.id).unwrap().is_empty());
+        assert_eq!(list[0].id, b.id);
+        assert_eq!(list[1].id, a.id);
+        assert_eq!(db.most_recent().unwrap().unwrap().id, b.id);
+
+        // 编辑 a（更新 updated_at）不应改变顺序——仍按 created_at 排。
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        db.save_record(&a.id, "later edit", "", 0).unwrap();
+        let list2 = db.list_records().unwrap();
+        assert_eq!(list2[0].id, b.id);
+        assert_eq!(list2[1].id, a.id);
+    }
+
+    #[test]
+    fn delete_record_works() {
+        let db = mem_db();
+        let a = db.create_record().unwrap();
+        let b = db.create_record().unwrap();
+        db.delete_record(&a.id).unwrap();
+        assert!(db.get_record(&a.id).unwrap().is_none());
+        assert_eq!(db.list_records().unwrap().len(), 1);
+        assert_eq!(db.list_records().unwrap()[0].id, b.id);
     }
 
     #[test]
     fn fts_search_chinese_substring() {
         let db = mem_db();
-        let s = db.ensure_default_session().unwrap();
-        db.insert_transcription(&s.id, "offline", 1, "帮我写一段提示词")
-            .unwrap();
-        db.insert_transcription(&s.id, "offline", 1, "今天天气不错")
-            .unwrap();
-        // trigram 子串检索（>=3 字符）。
-        let hits = db.search_transcriptions(&s.id, "提示词").unwrap();
+        let a = db.create_record().unwrap();
+        let b = db.create_record().unwrap();
+        db.save_record(&a.id, "帮我写一段提示词", "offline", 1).unwrap();
+        db.save_record(&b.id, "今天天气不错", "offline", 1).unwrap();
+
+        let hits = db.search_records("提示词").unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].text.contains("提示词"));
         // 短查询（<3 字符）走 LIKE。
-        let hits2 = db.search_transcriptions(&s.id, "天气").unwrap();
-        assert_eq!(hits2.len(), 1);
+        assert_eq!(db.search_records("天气").unwrap().len(), 1);
         // 空查询返回全部。
-        assert_eq!(db.search_transcriptions(&s.id, "  ").unwrap().len(), 2);
+        assert_eq!(db.search_records("  ").unwrap().len(), 2);
     }
 
     #[test]
     fn purge_and_export() {
         let db = mem_db();
-        let s = db.ensure_default_session().unwrap();
-        db.insert_transcription(&s.id, "offline", 1, "内容").unwrap();
-        // days=0 不清理。
-        assert_eq!(db.purge_older_than(0).unwrap(), 0);
-        // 未来 0 天前的不会被删（记录是刚插入的）。
-        assert_eq!(db.purge_older_than(30).unwrap(), 0);
+        let a = db.create_record().unwrap();
+        db.save_record(&a.id, "内容", "offline", 1).unwrap();
+        assert_eq!(db.purge_older_than(0).unwrap(), 0); // 不清理
+        assert_eq!(db.purge_older_than(30).unwrap(), 0); // 刚更新的不过期
 
         let json = db.export_json().unwrap();
-        assert!(json["sessions"].is_array());
-        assert_eq!(json["sessions"][0]["transcriptions"][0]["text"], "内容");
+        assert!(json["records"].is_array());
+        assert_eq!(json["records"][0]["text"], "内容");
     }
 }

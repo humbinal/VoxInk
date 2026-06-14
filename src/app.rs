@@ -1,34 +1,32 @@
-//! 主界面 View —— M1 任务 1.5 / §6.2 主界面布局；M2 任务 2.1/2.2/2.5 交互。
+//! 主界面 View —— 双栏布局（2026-06-14 重设计）：左侧常驻识别记录栏 + 右侧当前记录编辑区。
 //!
-//! - 录音按钮状态机：Idle ↔ Recording（M2 仅 UI 切换，真实录音在 M3）。
-//! - 一键复制：arboard 写入系统剪贴板，"✓ 已复制" 1.5s 反馈 + Toast。
-//! - 模式切换：同步写入全局配置，退出时持久化。
+//! - 左栏：「＋ 新建」+ 搜索 + 按时间分组（今天/昨天/近 7 天/近 30 天）的记录列表；当前项高亮、可删除。
+//! - 右栏：录音按钮（对当前记录续录追加）+ 模式切换 + 状态 + 文本编辑区 + 字数/复制。
+//! - 每条记录是一个可编辑、可续录的文档（§2.8 单表 records）；启动默认打开最近一条。
+//! - 录制中禁用「新建」与切换记录；正文手动编辑防抖自动保存。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use chrono::{DateTime, Local};
 use gpui::{
-    div, ease_in_out, prelude::*, px, rgb, white, Animation, AnimationExt,
-    AnyElement, ClickEvent, Context, Entity, Focusable, IntoElement, ParentElement, Render, SharedString, Styled,
-    Window,
+    div, ease_in_out, prelude::*, px, rgb, white, Animation, AnimationExt, AnyElement, ClickEvent,
+    Context, Entity, Focusable, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Window,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants}, h_flex,
-    input::{Input, InputState},
-    v_flex,
-    ActiveTheme,
-    Placement,
-    Root,
-    WindowExt,
+    button::{Button, ButtonVariants},
+    h_flex,
+    input::{Input, InputEvent, InputState},
+    v_flex, ActiveTheme, Root, WindowExt,
 };
 
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{AudioError, Recorder, StreamingCapture};
 use crate::config::VoxInkConfig;
-use crate::history::panel::HistoryPanel;
+use crate::history::db::Record;
 use crate::history::GlobalHistory;
 use crate::state::{AppState, RecordingState, TranscriptionMode};
 
@@ -42,12 +40,23 @@ pub struct GlobalTokioHandle(pub tokio::runtime::Handle);
 
 impl gpui::Global for GlobalTokioHandle {}
 
+/// 左栏宽度（px）。
+const SIDEBAR_WIDTH: f32 = 230.0;
+/// 手动编辑后自动保存的防抖时延。
+const AUTOSAVE_DEBOUNCE_MS: u64 = 800;
+
 /// VoxInk 主窗口视图。
 pub struct VoxInk {
     /// 应用全局状态（§2.1）。
     state: AppState,
-    /// 文本编辑器状态（gpui-component 多行输入）。
+    /// 文本编辑器状态（gpui-component 多行输入）——显示/编辑当前记录正文。
     editor: Entity<InputState>,
+    /// 左栏搜索框。
+    search: Entity<InputState>,
+    /// 左栏记录列表（按 updated_at 倒序；受搜索过滤）。
+    records: Vec<Record>,
+    /// 当前打开的记录 id（录音追加与编辑均作用于它）。
+    current_record_id: String,
     /// 复制成功后的短暂反馈标记（1.5s 后复位）。
     copied: bool,
     /// 当前离线录音会话（None 表示未在录音）。
@@ -56,16 +65,12 @@ pub struct VoxInk {
     streaming: Option<StreamingSession>,
     /// 实时识别失败后是否已切换到"停止后离线转写"。
     streaming_fallback: bool,
-    /// 本次流式会话累积的已固化文本（用于完成后整段存入历史，M10）。
-    streaming_transcript: String,
-    /// 停止流式时捕获的录音时长（秒），供异步完成时存历史用。
+    /// 停止流式时捕获的录音时长（秒），供异步完成时累加到记录时长。
     streaming_duration_secs: u32,
-    /// 当前会话 id（新转录归属此会话，M10 §4.3.3）。
-    current_session_id: String,
-    /// 各会话的编辑器文本缓冲（内存态，切换会话时保存/恢复；不跨重启持久化）。
-    session_buffers: HashMap<String, String>,
-    /// 历史面板子视图（在右侧 Sheet 抽屉中渲染）。
-    history_panel: Entity<HistoryPanel>,
+    /// 自动保存防抖代际计数（仅最新一次定时器生效）。
+    autosave_gen: u64,
+    /// 订阅句柄（编辑器/搜索变更）保活。
+    _subs: Vec<Subscription>,
 }
 
 /// 实时流式会话：持有流式采集句柄（cpal 流在主线程）。
@@ -80,11 +85,34 @@ impl VoxInk {
                 .multi_line(true)
                 .placeholder("点击「开始录音」用语音输入提示词，或直接在此编辑……")
         });
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索记录…"));
 
         // 初始转录模式取自持久化配置（§2.7 default_mode）。
         let mut state = AppState::default();
         if let Some(global) = cx.try_global::<GlobalConfig>() {
             state.transcription_mode = global.0.asr.default_mode;
+        }
+
+        // 启动默认打开最近一条记录；库为空则新建一条空记录（§4.3.3）。
+        let (current_record_id, initial_text, records) = match cx.try_global::<GlobalHistory>() {
+            Some(global) => {
+                let db = &global.0;
+                let current = match db.most_recent() {
+                    Ok(Some(r)) => Some(r),
+                    _ => db.create_record().ok(),
+                };
+                let records = db.search_records("").unwrap_or_default();
+                match current {
+                    Some(r) => (r.id, r.text, records),
+                    None => (String::new(), String::new(), records),
+                }
+            }
+            None => (String::new(), String::new(), Vec::new()),
+        };
+
+        // 载入当前记录正文到编辑器。
+        if !initial_text.is_empty() {
+            editor.update(cx, |s, cx| s.set_value(initial_text, window, cx));
         }
 
         // 启动时聚焦编辑器，便于直接键盘输入。
@@ -93,72 +121,196 @@ impl VoxInk {
             focus_handle.focus(window, cx);
         });
 
-        // 当前会话：取最近会话；不存在则创建默认会话（M10）。
-        let current_session_id = cx
-            .try_global::<GlobalHistory>()
-            .and_then(|g| g.0.ensure_default_session().ok())
-            .map(|s| s.id)
-            .unwrap_or_default();
-
-        // 历史面板子视图持有主视图句柄，用于回写编辑器、读取/切换当前会话。
-        let main_entity = cx.entity();
-        let history_panel = cx.new(|hcx| HistoryPanel::new(main_entity, window, hcx));
+        // 订阅：编辑器变更 → 防抖自动保存；搜索变更 → 重查列表。
+        let editor_sub = cx.subscribe(&editor, |this, _ed, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.schedule_autosave(cx);
+            }
+        });
+        let search_sub = cx.subscribe(&search, |this, _s, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.refresh_records(cx);
+            }
+        });
 
         Self {
             state,
             editor,
+            search,
+            records,
+            current_record_id,
             copied: false,
             recorder: None,
             streaming: None,
             streaming_fallback: false,
-            streaming_transcript: String::new(),
             streaming_duration_secs: 0,
-            current_session_id,
-            session_buffers: HashMap::new(),
-            history_panel,
+            autosave_gen: 0,
+            _subs: vec![editor_sub, search_sub],
         }
     }
 
-    /// 切换当前会话：保存当前编辑器文本到旧会话缓冲，恢复目标会话缓冲（§4.3.3）。
-    pub fn switch_session(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if id == self.current_session_id {
-            return;
+    fn is_idle(&self) -> bool {
+        self.state.recording_state == RecordingState::Idle
+    }
+
+    // ───────────────────────────── 记录管理（M10 重设计）─────────────────────────────
+
+    /// 按当前搜索词重查记录列表并刷新 UI。
+    fn refresh_records(&mut self, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).value().to_string();
+        if let Some(global) = cx.try_global::<GlobalHistory>() {
+            self.records = global.0.search_records(&query).unwrap_or_default();
         }
-        let prev = std::mem::replace(&mut self.current_session_id, id.clone());
-        let current_text = self.editor.read(cx).value().to_string();
-        self.session_buffers.insert(prev, current_text);
-        let restored = self.session_buffers.get(&id).cloned().unwrap_or_default();
-        self.editor.update(cx, |state, cx| {
-            state.set_value(restored, window, cx);
-        });
-        tracing::info!(session = %id, "切换会话");
         cx.notify();
     }
 
-    /// 把历史记录文本载入编辑器（追加到末尾，非破坏性）。
-    pub fn load_history_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        append_text(&self.editor, text, window, cx);
-    }
-
-    /// 保存一条转录到当前会话历史，并刷新历史面板（M10 任务 10.1）。
-    fn save_to_history(&mut self, mode: &str, duration_secs: u32, text: &str, cx: &mut Context<Self>) {
-        let text = text.trim();
-        if text.is_empty() {
+    /// 把当前编辑器正文写回当前记录（保持其 mode/duration 不变）——用于手动编辑自动保存、切换前刷写。
+    /// 正文无改动时直接跳过：既省一次写，也避免无谓地刷新 updated_at（纯选中不应触发写）。
+    fn flush_editor_to_record(&mut self, cx: &Context<Self>) {
+        if self.current_record_id.is_empty() {
             return;
         }
-        let session_id = self.current_session_id.clone();
-        if let Some(global) = cx.try_global::<GlobalHistory>() {
-            let db = &global.0;
-            match db.insert_transcription(&session_id, mode, duration_secs, text) {
-                Ok(_) => {
-                    let _ = db.touch_session(&session_id);
-                }
-                Err(e) => tracing::error!("保存历史失败: {e:#}"),
+        let text = self.editor.read(cx).value().to_string();
+        let id = self.current_record_id.clone();
+        if let Some(global) = cx.try_global::<GlobalHistory>()
+            && let Some(rec) = global.0.get_record(&id).ok().flatten()
+        {
+            if rec.text == text {
+                return; // 无改动，不写
+            }
+            if let Err(e) = global.0.save_record(&id, &text, &rec.mode, rec.duration_secs) {
+                tracing::error!("自动保存失败: {e:#}");
             }
         }
-        // 把当前会话 id 传给面板并刷新（不能让面板回读主视图——见 panel 注释）。
-        self.history_panel
-            .update(cx, |panel, pcx| panel.refresh_for(session_id, pcx));
+    }
+
+    /// 录制完成后把编辑器正文写回当前记录，并累加本次时长、记录模式。
+    fn persist_after_recording(&mut self, mode: &str, added_secs: u32, cx: &mut Context<Self>) {
+        if self.current_record_id.is_empty() {
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        let id = self.current_record_id.clone();
+        if let Some(global) = cx.try_global::<GlobalHistory>() {
+            let db = &global.0;
+            let base = db
+                .get_record(&id)
+                .ok()
+                .flatten()
+                .map(|r| r.duration_secs)
+                .unwrap_or(0);
+            if let Err(e) = db.save_record(&id, &text, mode, base + added_secs) {
+                tracing::error!("保存记录失败: {e:#}");
+            }
+        }
+        self.refresh_records(cx);
+    }
+
+    /// 防抖自动保存：仅空闲时生效（录制中由完成时统一写回）。
+    fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        if !self.is_idle() {
+            return;
+        }
+        self.autosave_gen += 1;
+        let generation = self.autosave_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(AUTOSAVE_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.autosave_gen == generation && this.is_idle() {
+                    this.flush_editor_to_record(cx);
+                    this.refresh_records(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 新建一条空记录并切为当前（录制中禁用）。
+    fn on_new_record(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_idle() {
+            window.push_notification("录制中，暂不能新建记录", cx);
+            return;
+        }
+        self.flush_editor_to_record(cx);
+        let new_rec = match cx.try_global::<GlobalHistory>() {
+            Some(global) => match global.0.create_record() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("新建记录失败: {e:#}");
+                    window.push_notification("新建记录失败", cx);
+                    return;
+                }
+            },
+            None => return,
+        };
+        self.current_record_id = new_rec.id;
+        self.editor.update(cx, |s, cx| s.set_value("", window, cx));
+        self.refresh_records(cx);
+        let focus_handle = self.editor.focus_handle(cx);
+        focus_handle.focus(window, cx);
+    }
+
+    /// 选择并载入一条记录到编辑器（录制中禁用切换）。
+    fn select_record(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if id == self.current_record_id {
+            return;
+        }
+        if !self.is_idle() {
+            window.push_notification("录制中，暂不能切换记录", cx);
+            return;
+        }
+        self.flush_editor_to_record(cx);
+        let rec = cx
+            .try_global::<GlobalHistory>()
+            .and_then(|g| g.0.get_record(&id).ok().flatten());
+        if let Some(rec) = rec {
+            self.current_record_id = rec.id;
+            self.editor.update(cx, |s, cx| s.set_value(rec.text, window, cx));
+        }
+        self.refresh_records(cx);
+    }
+
+    /// 删除一条记录；若删的是当前记录，则切到最近一条（无则新建空记录）。
+    fn delete_record(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_idle() {
+            window.push_notification("录制中，暂不能删除记录", cx);
+            return;
+        }
+        let deleting_current = id == self.current_record_id;
+        if let Some(global) = cx.try_global::<GlobalHistory>()
+            && let Err(e) = global.0.delete_record(&id)
+        {
+            tracing::error!("删除记录失败: {e:#}");
+            window.push_notification("删除记录失败", cx);
+            return;
+        }
+
+        if deleting_current {
+            // 切到剩余最近一条；都没有了就新建一条空记录。
+            let next = match cx.try_global::<GlobalHistory>() {
+                Some(global) => {
+                    let db = &global.0;
+                    match db.most_recent() {
+                        Ok(Some(r)) => Some(r),
+                        _ => db.create_record().ok(),
+                    }
+                }
+                None => None,
+            };
+            match next {
+                Some(rec) => {
+                    self.current_record_id = rec.id;
+                    self.editor.update(cx, |s, cx| s.set_value(rec.text, window, cx));
+                }
+                None => {
+                    self.current_record_id = String::new();
+                    self.editor.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+            }
+        }
+        self.refresh_records(cx);
     }
 
     fn max_recording_seconds(&self, cx: &Context<Self>) -> u32 {
@@ -259,7 +411,8 @@ impl VoxInk {
                 match outcome {
                     Ok(Ok(text)) => {
                         append_text(&this.editor, &text, window, cx);
-                        this.save_to_history("offline", duration_secs, &text, cx);
+                        // 追加到当前记录并累加时长（任务 10.3）。
+                        this.persist_after_recording("offline", duration_secs, cx);
                         window.push_notification("转写完成", cx);
                     }
                     Ok(Err(e)) => {
@@ -273,7 +426,7 @@ impl VoxInk {
                 cx.notify();
             });
         })
-            .detach();
+        .detach();
     }
 
     /// 从持久化配置构造运行期 `AsrConfig`（api_key 为内存中的明文）。
@@ -351,7 +504,6 @@ impl VoxInk {
         };
         self.streaming = Some(StreamingSession { capture });
         self.streaming_fallback = false;
-        self.streaming_transcript.clear();
         self.streaming_duration_secs = 0;
         self.state.recording_state = RecordingState::Recording;
         self.state.recording_duration_secs = 0;
@@ -389,7 +541,7 @@ impl VoxInk {
                 this.on_streaming_backend_done(done, window, cx);
             });
         })
-            .detach();
+        .detach();
     }
 
     /// 停止实时流式：收尾 WAV → 已失败则离线转写，否则等待最终结果。
@@ -400,7 +552,7 @@ impl VoxInk {
         };
         match session.capture.stop() {
             Ok(outcome) => {
-                // 捕获时长供异步完成时写历史用。
+                // 捕获时长供异步完成时累加到记录。
                 self.streaming_duration_secs = outcome.duration.as_secs() as u32;
                 self.state.recording_state = RecordingState::Processing;
                 self.state.recording_duration_secs = 0;
@@ -430,9 +582,8 @@ impl VoxInk {
         cx: &mut Context<Self>,
     ) {
         if result.is_final {
-            // 整句稳定：固化到编辑器，清空 pending，并累积到本次会话转录（存历史用）。
+            // 整句稳定：固化到编辑器（即追加到当前记录正文），清空 pending。
             append_text(&self.editor, &result.delta_text, window, cx);
-            append_line(&mut self.streaming_transcript, &result.delta_text);
             self.state.pending_text.clear();
         } else {
             // 未稳定：替换 pending（DashScope 发整句而非增量）。
@@ -441,7 +592,7 @@ impl VoxInk {
         cx.notify();
     }
 
-    /// 后端结束处理：成功转 Idle；鉴权失败提示；其它失败标记回退离线。
+    /// 后端结束处理：成功转 Idle 并把整段写回当前记录；鉴权失败提示；其它失败标记回退离线。
     fn on_streaming_backend_done(
         &mut self,
         done: Result<(), AsrError>,
@@ -452,14 +603,13 @@ impl VoxInk {
         if !self.state.pending_text.is_empty() {
             let pending = std::mem::take(&mut self.state.pending_text);
             append_text(&self.editor, &pending, window, cx);
-            append_line(&mut self.streaming_transcript, &pending);
         }
 
         match done {
             Ok(()) => {
-                // 整段实时转录存入历史（任务 10.1）。
-                let transcript = self.streaming_transcript.clone();
-                self.save_to_history("streaming", self.streaming_duration_secs, &transcript, cx);
+                // 把当前记录（含本次追加）写回 + 累加时长（任务 10.3）。
+                let added = self.streaming_duration_secs;
+                self.persist_after_recording("streaming", added, cx);
                 window.push_notification("识别完成", cx);
                 self.finish_to_idle(cx);
             }
@@ -491,7 +641,6 @@ impl VoxInk {
         self.state.pending_text.clear();
         self.streaming = None;
         self.streaming_fallback = false;
-        self.streaming_transcript.clear();
         cx.notify();
     }
 
@@ -521,7 +670,7 @@ impl VoxInk {
                 }
             }
         })
-            .detach();
+        .detach();
     }
 
     /// 录音时长格式化为 `MM:SS`。
@@ -632,7 +781,7 @@ impl VoxInk {
                         cx.notify();
                     });
                 })
-                    .detach();
+                .detach();
             }
             Err(e) => {
                 tracing::error!("复制失败: {e:#}");
@@ -670,56 +819,232 @@ impl VoxInk {
                 Err(_) => window.push_notification("连接测试中断", cx),
             });
         })
-            .detach();
+        .detach();
     }
 
-    /// 打开历史面板（右侧 Sheet 抽屉，M10 任务 10.2）。
-    fn on_open_history(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // 打开前刷新一次列表（传入当前会话 id；面板不回读主视图，避免双重租借 panic）。
-        let session_id = self.current_session_id.clone();
-        self.history_panel
-            .update(cx, |panel, pcx| panel.refresh_for(session_id, pcx));
-        let panel = self.history_panel.clone();
-        window.open_sheet_at(Placement::Right, cx, move |sheet, _window, _app| {
-            sheet
-                .title("历史记录")
-                .size(px(380.))
-                .child(panel.clone())
-        });
+    /// 导出全部记录为 JSON（写入配置目录，Toast 路径；任务 10.4）。
+    fn on_export(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let result = (|| -> anyhow::Result<PathBuf> {
+            let global = cx
+                .try_global::<GlobalHistory>()
+                .ok_or_else(|| anyhow::anyhow!("历史数据库不可用"))?;
+            let json = global.0.export_json()?;
+            let dir = crate::history::db::HistoryDb::default_path()?
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            let path = dir.join(format!(
+                "history_export_{}.json",
+                Local::now().format("%Y%m%d_%H%M%S")
+            ));
+            std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+            Ok(path)
+        })();
+
+        match result {
+            Ok(path) => {
+                tracing::info!("历史已导出: {}", path.display());
+                window.push_notification(format!("已导出到 {}", path.display()), cx);
+            }
+            Err(e) => {
+                tracing::error!("导出历史失败: {e:#}");
+                window.push_notification("导出失败", cx);
+            }
+        }
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .justify_between()
-            .items_center()
-            .w_full()
-            .px_4()
-            .py_3()
-            .border_b_1()
+    // ───────────────────────────── 渲染：左栏 ─────────────────────────────
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .w(px(SIDEBAR_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .bg(cx.theme().sidebar)
+            .border_r_1()
             .border_color(cx.theme().border)
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child("🎙 VoxInk"),
-            )
-            .child(
+                // 标题 + 设置
                 h_flex()
-                    .gap_1()
+                    .justify_between()
+                    .items_center()
+                    .px_3()
+                    .py_3()
                     .child(
-                        Button::new("history")
-                            .ghost()
-                            .label("📜 历史")
-                            .on_click(cx.listener(Self::on_open_history)),
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("🎙 VoxInk"),
                     )
                     .child(
-                        Button::new("settings")
-                            .ghost()
-                            .label("⚙ 设置")
-                            .on_click(cx.listener(Self::on_open_settings)),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("export")
+                                    .ghost()
+                                    .label("⬇")
+                                    .on_click(cx.listener(Self::on_export)),
+                            )
+                            .child(
+                                Button::new("settings")
+                                    .ghost()
+                                    .label("⚙")
+                                    .on_click(cx.listener(Self::on_open_settings)),
+                            ),
                     ),
             )
+            .child(div().px_3().pb_2().child(self.render_new_button(cx)))
+            .child(div().px_3().pb_2().child(Input::new(&self.search)))
+            .child(self.render_record_list(cx))
     }
+
+    /// 「＋ 新建」按钮；录制中禁用（变灰、不可点）。
+    fn render_new_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let is_idle = self.is_idle();
+        let mut btn = div()
+            .id("new-record")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w_full()
+            .h(px(34.))
+            .rounded(px(8.))
+            .bg(cx.theme().accent)
+            .text_color(cx.theme().accent_foreground)
+            .child("＋ 新建");
+        if is_idle {
+            btn = btn
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.9))
+                .on_click(cx.listener(Self::on_new_record));
+        } else {
+            btn = btn.opacity(0.5);
+        }
+        btn.into_any_element()
+    }
+
+    fn render_record_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = v_flex()
+            .id("record-list")
+            .flex_1()
+            .w_full()
+            .gap_1()
+            .px_2()
+            .pb_2()
+            .overflow_y_scroll();
+
+        if self.records.is_empty() {
+            return list.child(
+                div()
+                    .px_2()
+                    .py_3()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("暂无记录"),
+            );
+        }
+
+        let current = self.current_record_id.clone();
+        let is_idle = self.is_idle();
+        let mut last_bucket = "";
+        for rec in &self.records {
+            let bucket = record_bucket(&rec.created_at);
+            if bucket != last_bucket {
+                last_bucket = bucket;
+                list = list.child(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(bucket),
+                );
+            }
+            list = list.child(self.render_record_item(rec, &current, is_idle, cx));
+        }
+        list
+    }
+
+    fn render_record_item(
+        &self,
+        rec: &Record,
+        current: &str,
+        is_idle: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_current = rec.id == *current;
+        let select_id = rec.id.clone();
+        let del_id = rec.id.clone();
+        let title = if rec.title.trim().is_empty() {
+            crate::history::db::NEW_RECORD_TITLE.to_string()
+        } else {
+            rec.title.clone()
+        };
+
+        let mut body = div()
+            .id(elem_id("recbody", &rec.id))
+            .flex_1()
+            .overflow_hidden()
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_0p5()
+                    // 标题单行截断（省略号），避免长文本换行撑高列表项。
+                    .child(div().w_full().text_sm().truncate().child(title))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(mode_icon(&rec.mode))
+                            .child(time_label(&rec.created_at)),
+                    ),
+            );
+        if is_idle {
+            body = body
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_record(select_id.clone(), window, cx)
+                }));
+        }
+
+        let mut row = h_flex()
+            .id(elem_id("rec", &rec.id))
+            .w_full()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .rounded(px(6.))
+            .overflow_hidden()
+            .child(body);
+
+        if is_current {
+            row = row.bg(cx.theme().list_active);
+        } else if is_idle {
+            row = row.hover(|s| s.bg(cx.theme().muted));
+        }
+
+        if is_idle {
+            row = row.child(
+                div()
+                    .id(elem_id("recdel", &rec.id))
+                    .px_1()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.text_color(rgb(0xE74C3C)))
+                    .child("✕")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.delete_record(del_id.clone(), window, cx)
+                    })),
+            );
+        }
+        row
+    }
+
+    // ───────────────────────────── 渲染：右栏 ─────────────────────────────
 
     /// 录音按钮：按状态变色/变字；Recording 时叠加脉冲呼吸动画；Processing 不可点击。
     fn render_record_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -868,24 +1193,32 @@ impl VoxInk {
 
 impl Render for VoxInk {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // gpui-component 的 Sheet/Dialog/Notification 浮层不由 Root::render 自动绘制——
-        // 顶层内容视图须显式渲染这些层并作为子元素加入，否则 open_sheet/push_notification
-        // 只改状态却看不到任何东西（历史抽屉、Toast 均依赖此处）。
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
+        // gpui-component 的 Notification/Dialog 浮层不由 Root::render 自动绘制——
+        // 顶层内容视图须显式渲染并作为子元素加入，否则 push_notification 只改状态却看不到。
         let notification_layer = Root::render_notification_layer(window, cx);
+        let dialog_layer = Root::render_dialog_layer(window, cx);
 
-        v_flex()
+        div()
             .size_full()
+            .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_header(cx))
-            .child(self.render_controls(cx))
-            .child(self.render_editor(cx))
-            .child(self.render_footer(cx))
-            .children(sheet_layer)
-            .children(dialog_layer)
+            .child(
+                h_flex()
+                    .size_full()
+                    .child(self.render_sidebar(cx))
+                    .child(
+                        // 右栏：录制控制 + 编辑区 + 底栏。
+                        v_flex()
+                            .flex_1()
+                            .h_full()
+                            .child(self.render_controls(cx))
+                            .child(self.render_editor(cx))
+                            .child(self.render_footer(cx)),
+                    ),
+            )
             .children(notification_layer)
+            .children(dialog_layer)
     }
 }
 
@@ -958,19 +1291,7 @@ fn resolve_backend_id(config: &AsrConfig, want_streaming: bool, audio_len: Optio
     }
 }
 
-/// 把一段文本追加到字符串缓冲（非空时前置换行），用于累积流式整段转录。
-fn append_line(buffer: &mut String, text: &str) {
-    let text = text.trim();
-    if text.is_empty() {
-        return;
-    }
-    if !buffer.is_empty() {
-        buffer.push('\n');
-    }
-    buffer.push_str(text);
-}
-
-/// 将转写文本追加到编辑器末尾（离线模式追加，§4.3.1）。
+/// 将转写文本追加到编辑器末尾（追加模式，§4.3.1）。
 fn append_text(editor: &Entity<InputState>, text: &str, window: &mut Window, cx: &mut Context<VoxInk>) {
     editor.update(cx, |state, cx| {
         let mut value = state.value().to_string();
@@ -980,6 +1301,55 @@ fn append_text(editor: &Entity<InputState>, text: &str, window: &mut Window, cx:
         value.push_str(text);
         state.set_value(value, window, cx);
     });
+}
+
+/// 由前缀 + 记录 id 派生稳定且唯一的 ElementId（避免同列表内 id 冲突）。
+fn elem_id(prefix: &str, id: &str) -> SharedString {
+    SharedString::from(format!("{prefix}-{id}"))
+}
+
+/// 模式图标。
+fn mode_icon(mode: &str) -> &'static str {
+    match mode {
+        "streaming" => "🎤",
+        "offline" => "📄",
+        _ => "•",
+    }
+}
+
+/// RFC3339 UTC → 本地时间标签：今天显示 HH:MM，否则 MM-DD。
+fn time_label(updated_at: &str) -> String {
+    match DateTime::parse_from_rfc3339(updated_at) {
+        Ok(dt) => {
+            let local = dt.with_timezone(&Local);
+            if local.date_naive() == Local::now().date_naive() {
+                local.format("%H:%M").to_string()
+            } else {
+                local.format("%m-%d").to_string()
+            }
+        }
+        Err(_) => updated_at.chars().take(10).collect(),
+    }
+}
+
+/// 按记录创建时间计算时间分组（类聊天应用：今天/昨天/近 7 天/近 30 天/更早）。
+fn record_bucket(created_at: &str) -> &'static str {
+    let Ok(dt) = DateTime::parse_from_rfc3339(created_at) else {
+        return "更早";
+    };
+    let date = dt.with_timezone(&Local).date_naive();
+    let days = (Local::now().date_naive() - date).num_days();
+    if days <= 0 {
+        "今天"
+    } else if days == 1 {
+        "昨天"
+    } else if days <= 7 {
+        "近 7 天"
+    } else if days <= 30 {
+        "近 30 天"
+    } else {
+        "更早"
+    }
 }
 
 /// 把 `AsrError` 映射为用户友好的中文提示（任务 4.5）。

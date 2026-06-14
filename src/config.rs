@@ -154,8 +154,9 @@ impl Default for WindowConfig {
         Self {
             x: 0,
             y: 0,
-            width: 480,
-            height: 600,
+            // 双栏布局（左记录栏 + 右编辑区）默认更宽（§6.1，2026-06-14 重设计）。
+            width: 880,
+            height: 640,
         }
     }
 }
@@ -358,7 +359,7 @@ mod tests {
         let back: VoxInkConfig = toml::from_str(&text).unwrap();
         assert_eq!(back.version, cfg.version);
         assert_eq!(back.asr.default_mode, cfg.asr.default_mode);
-        assert_eq!(back.window.width, 480);
+        assert_eq!(back.window.width, 880);
     }
 
     #[test]

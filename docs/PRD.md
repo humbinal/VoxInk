@@ -1156,6 +1156,19 @@ ffprobe <生成的 wav 文件>
 **任务 10.4: 数据保留**
 - 按 `history_retention_days` 自动清理过期记录；支持导出为 JSON。
 
+> 📝 **M10 落地说明**：
+> - **DB**：`rusqlite`（`bundled`，编译期含 FTS5）。库文件 `{配置目录}/VoxInk/history.db`（与 config.toml 同目录）。
+>   连接在 GPUI 主线程持有（`!Sync`，本地 SQLite 操作极快不阻塞 UI，不另起后台 DB 线程）；经 `GlobalHistory` 全局共享。
+> - **§2.8 schema 补充**（实现细节）：外部内容 FTS5 需配套 INSERT/DELETE/UPDATE 触发器与 `transcriptions` 同步；
+>   且 FTS 表用 `tokenize='trigram'`——默认 unicode61 对中文（无空格）几乎不分词，trigram 才能中文子串全文检索。
+>   语义不变（仍是 transcriptions 的全文索引）。短于 3 字符的查询退化为 `LIKE` 子串匹配。
+> - **UI**：历史面板为子视图，渲染在 gpui-component 的 Sheet（右侧抽屉，`window.open_sheet_at(Placement::Right, …)`），
+>   主界面 Header 新增「📜 历史」按钮触发。含会话切换/新建/删除、实时搜索、列表（时间+模式图标+预览）、点击载入（追加到编辑器）、删除单条/清空、导出。
+> - **会话切换的编辑器上下文**：各会话的编辑器文本以**内存态** `HashMap<session_id,String>` 保存/恢复（切换时存旧、载新）；不跨重启持久化（持久的是 DB 中的离散转录记录）。
+> - **新建会话命名**：面板内有名称输入框；留空则自动命名「会话 MM-DD HH:MM」。
+> - **导出**：写入 `{配置目录}/VoxInk/history_export_{时间戳}.json`（无文件对话框，直接落盘并 Toast 路径）。
+> - **mode 取值**：离线存 `"offline"`，实时存 `"streaming"`（§2.8 的 `"local"` 因本地 ASR 已取消而不产生）。
+
 #### 验收标准
 - [ ] 转录完成后自动保存到历史
 - [ ] 历史列表可查看、搜索、点击载入

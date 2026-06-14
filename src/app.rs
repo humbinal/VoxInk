@@ -4,6 +4,7 @@
 //! - 一键复制：arboard 写入系统剪贴板，"✓ 已复制" 1.5s 反馈 + Toast。
 //! - 模式切换：同步写入全局配置，退出时持久化。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,6 +19,8 @@ use gpui_component::{
     input::{Input, InputState},
     v_flex,
     ActiveTheme,
+    Placement,
+    Root,
     WindowExt,
 };
 
@@ -25,6 +28,8 @@ use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{AudioError, Recorder, StreamingCapture};
 use crate::config::VoxInkConfig;
+use crate::history::panel::HistoryPanel;
+use crate::history::GlobalHistory;
 use crate::state::{AppState, RecordingState, TranscriptionMode};
 
 /// 以全局形式承载持久化配置，便于跨 View 读写、退出时统一保存。
@@ -51,6 +56,16 @@ pub struct VoxInk {
     streaming: Option<StreamingSession>,
     /// 实时识别失败后是否已切换到"停止后离线转写"。
     streaming_fallback: bool,
+    /// 本次流式会话累积的已固化文本（用于完成后整段存入历史，M10）。
+    streaming_transcript: String,
+    /// 停止流式时捕获的录音时长（秒），供异步完成时存历史用。
+    streaming_duration_secs: u32,
+    /// 当前会话 id（新转录归属此会话，M10 §4.3.3）。
+    current_session_id: String,
+    /// 各会话的编辑器文本缓冲（内存态，切换会话时保存/恢复；不跨重启持久化）。
+    session_buffers: HashMap<String, String>,
+    /// 历史面板子视图（在右侧 Sheet 抽屉中渲染）。
+    history_panel: Entity<HistoryPanel>,
 }
 
 /// 实时流式会话：持有流式采集句柄（cpal 流在主线程）。
@@ -78,6 +93,17 @@ impl VoxInk {
             focus_handle.focus(window, cx);
         });
 
+        // 当前会话：取最近会话；不存在则创建默认会话（M10）。
+        let current_session_id = cx
+            .try_global::<GlobalHistory>()
+            .and_then(|g| g.0.ensure_default_session().ok())
+            .map(|s| s.id)
+            .unwrap_or_default();
+
+        // 历史面板子视图持有主视图句柄，用于回写编辑器、读取/切换当前会话。
+        let main_entity = cx.entity();
+        let history_panel = cx.new(|hcx| HistoryPanel::new(main_entity, window, hcx));
+
         Self {
             state,
             editor,
@@ -85,7 +111,54 @@ impl VoxInk {
             recorder: None,
             streaming: None,
             streaming_fallback: false,
+            streaming_transcript: String::new(),
+            streaming_duration_secs: 0,
+            current_session_id,
+            session_buffers: HashMap::new(),
+            history_panel,
         }
+    }
+
+    /// 切换当前会话：保存当前编辑器文本到旧会话缓冲，恢复目标会话缓冲（§4.3.3）。
+    pub fn switch_session(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if id == self.current_session_id {
+            return;
+        }
+        let prev = std::mem::replace(&mut self.current_session_id, id.clone());
+        let current_text = self.editor.read(cx).value().to_string();
+        self.session_buffers.insert(prev, current_text);
+        let restored = self.session_buffers.get(&id).cloned().unwrap_or_default();
+        self.editor.update(cx, |state, cx| {
+            state.set_value(restored, window, cx);
+        });
+        tracing::info!(session = %id, "切换会话");
+        cx.notify();
+    }
+
+    /// 把历史记录文本载入编辑器（追加到末尾，非破坏性）。
+    pub fn load_history_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        append_text(&self.editor, text, window, cx);
+    }
+
+    /// 保存一条转录到当前会话历史，并刷新历史面板（M10 任务 10.1）。
+    fn save_to_history(&mut self, mode: &str, duration_secs: u32, text: &str, cx: &mut Context<Self>) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let session_id = self.current_session_id.clone();
+        if let Some(global) = cx.try_global::<GlobalHistory>() {
+            let db = &global.0;
+            match db.insert_transcription(&session_id, mode, duration_secs, text) {
+                Ok(_) => {
+                    let _ = db.touch_session(&session_id);
+                }
+                Err(e) => tracing::error!("保存历史失败: {e:#}"),
+            }
+        }
+        // 把当前会话 id 传给面板并刷新（不能让面板回读主视图——见 panel 注释）。
+        self.history_panel
+            .update(cx, |panel, pcx| panel.refresh_for(session_id, pcx));
     }
 
     fn max_recording_seconds(&self, cx: &Context<Self>) -> u32 {
@@ -137,7 +210,8 @@ impl VoxInk {
                     );
                 }
                 // 录音完成后自动触发离线转写（任务 4.4）。
-                self.start_transcription(window, cx, outcome.path);
+                let duration_secs = outcome.duration.as_secs() as u32;
+                self.start_transcription(window, cx, outcome.path, duration_secs);
             }
             Err(e) => {
                 tracing::error!("停止录音失败: {e}");
@@ -150,7 +224,13 @@ impl VoxInk {
     }
 
     /// 进入 Processing 并在 Tokio 后台执行离线转写，结果回主线程追加到编辑器（任务 4.4/4.5）。
-    fn start_transcription(&mut self, window: &mut Window, cx: &mut Context<Self>, wav_path: PathBuf) {
+    fn start_transcription(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        wav_path: PathBuf,
+        duration_secs: u32,
+    ) {
         self.state.recording_state = RecordingState::Processing;
         cx.notify();
         window.push_notification("正在识别…", cx);
@@ -179,6 +259,7 @@ impl VoxInk {
                 match outcome {
                     Ok(Ok(text)) => {
                         append_text(&this.editor, &text, window, cx);
+                        this.save_to_history("offline", duration_secs, &text, cx);
                         window.push_notification("转写完成", cx);
                     }
                     Ok(Err(e)) => {
@@ -270,6 +351,8 @@ impl VoxInk {
         };
         self.streaming = Some(StreamingSession { capture });
         self.streaming_fallback = false;
+        self.streaming_transcript.clear();
+        self.streaming_duration_secs = 0;
         self.state.recording_state = RecordingState::Recording;
         self.state.recording_duration_secs = 0;
         self.state.pending_text.clear();
@@ -317,12 +400,15 @@ impl VoxInk {
         };
         match session.capture.stop() {
             Ok(outcome) => {
+                // 捕获时长供异步完成时写历史用。
+                self.streaming_duration_secs = outcome.duration.as_secs() as u32;
                 self.state.recording_state = RecordingState::Processing;
                 self.state.recording_duration_secs = 0;
                 cx.notify();
                 if self.streaming_fallback {
                     window.push_notification("实时识别失败，正在离线转写…", cx);
-                    self.start_transcription(window, cx, outcome.path);
+                    let duration_secs = outcome.duration.as_secs() as u32;
+                    self.start_transcription(window, cx, outcome.path, duration_secs);
                 } else {
                     // 关闭音频通道触发后端 finish-task → 最终结果 → done（转 Idle）。
                     window.push_notification("正在生成最终结果…", cx);
@@ -344,8 +430,9 @@ impl VoxInk {
         cx: &mut Context<Self>,
     ) {
         if result.is_final {
-            // 整句稳定：固化到编辑器，清空 pending。
+            // 整句稳定：固化到编辑器，清空 pending，并累积到本次会话转录（存历史用）。
             append_text(&self.editor, &result.delta_text, window, cx);
+            append_line(&mut self.streaming_transcript, &result.delta_text);
             self.state.pending_text.clear();
         } else {
             // 未稳定：替换 pending（DashScope 发整句而非增量）。
@@ -365,10 +452,14 @@ impl VoxInk {
         if !self.state.pending_text.is_empty() {
             let pending = std::mem::take(&mut self.state.pending_text);
             append_text(&self.editor, &pending, window, cx);
+            append_line(&mut self.streaming_transcript, &pending);
         }
 
         match done {
             Ok(()) => {
+                // 整段实时转录存入历史（任务 10.1）。
+                let transcript = self.streaming_transcript.clone();
+                self.save_to_history("streaming", self.streaming_duration_secs, &transcript, cx);
                 window.push_notification("识别完成", cx);
                 self.finish_to_idle(cx);
             }
@@ -400,6 +491,7 @@ impl VoxInk {
         self.state.pending_text.clear();
         self.streaming = None;
         self.streaming_fallback = false;
+        self.streaming_transcript.clear();
         cx.notify();
     }
 
@@ -581,6 +673,21 @@ impl VoxInk {
             .detach();
     }
 
+    /// 打开历史面板（右侧 Sheet 抽屉，M10 任务 10.2）。
+    fn on_open_history(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // 打开前刷新一次列表（传入当前会话 id；面板不回读主视图，避免双重租借 panic）。
+        let session_id = self.current_session_id.clone();
+        self.history_panel
+            .update(cx, |panel, pcx| panel.refresh_for(session_id, pcx));
+        let panel = self.history_panel.clone();
+        window.open_sheet_at(Placement::Right, cx, move |sheet, _window, _app| {
+            sheet
+                .title("历史记录")
+                .size(px(380.))
+                .child(panel.clone())
+        });
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .justify_between()
@@ -597,10 +704,20 @@ impl VoxInk {
                     .child("🎙 VoxInk"),
             )
             .child(
-                Button::new("settings")
-                    .ghost()
-                    .label("⚙ 设置")
-                    .on_click(cx.listener(Self::on_open_settings)),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("history")
+                            .ghost()
+                            .label("📜 历史")
+                            .on_click(cx.listener(Self::on_open_history)),
+                    )
+                    .child(
+                        Button::new("settings")
+                            .ghost()
+                            .label("⚙ 设置")
+                            .on_click(cx.listener(Self::on_open_settings)),
+                    ),
             )
     }
 
@@ -750,7 +867,14 @@ impl VoxInk {
 }
 
 impl Render for VoxInk {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // gpui-component 的 Sheet/Dialog/Notification 浮层不由 Root::render 自动绘制——
+        // 顶层内容视图须显式渲染这些层并作为子元素加入，否则 open_sheet/push_notification
+        // 只改状态却看不到任何东西（历史抽屉、Toast 均依赖此处）。
+        let sheet_layer = Root::render_sheet_layer(window, cx);
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+
         v_flex()
             .size_full()
             .bg(cx.theme().background)
@@ -759,6 +883,9 @@ impl Render for VoxInk {
             .child(self.render_controls(cx))
             .child(self.render_editor(cx))
             .child(self.render_footer(cx))
+            .children(sheet_layer)
+            .children(dialog_layer)
+            .children(notification_layer)
     }
 }
 
@@ -829,6 +956,18 @@ fn resolve_backend_id(config: &AsrConfig, want_streaming: bool, audio_len: Optio
     } else {
         "aliyun_bailian_offline".to_string()
     }
+}
+
+/// 把一段文本追加到字符串缓冲（非空时前置换行），用于累积流式整段转录。
+fn append_line(buffer: &mut String, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if !buffer.is_empty() {
+        buffer.push('\n');
+    }
+    buffer.push_str(text);
 }
 
 /// 将转写文本追加到编辑器末尾（离线模式追加，§4.3.1）。

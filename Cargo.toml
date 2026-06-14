@@ -76,6 +76,10 @@ auto-launch = "0.5"
 # 全局快捷键（§1.4，M9）。Tauri 团队维护，跨平台系统级热键。
 global-hotkey = "0.8"
 
+# 本地历史数据库（§1.4/§2.8，M10）。bundled 自带编译期启用 FTS5（含 trigram 分词器，
+# 用于中文子串全文检索）的 SQLite，无需系统 sqlite/C 依赖。
+rusqlite = { version = "0.40", features = ["bundled"] }
+
 [target.'cfg(windows)'.dependencies]
 # 窗口隐藏到托盘需直接调用 Win32 ShowWindow（gpui 在 Windows 上不公开 hide/minimize）；
 # 一键复制并粘贴需 SendInput 模拟 Ctrl+V（M9，Win32_UI_Input_KeyboardAndMouse）。

@@ -7,7 +7,9 @@ mod asr;
 mod audio;
 mod autolaunch;
 mod config;
+mod history;
 mod hotkey;
+mod session;
 mod state;
 mod tray;
 
@@ -75,6 +77,20 @@ fn main() -> Result<()> {
         // 配置以全局形式承载，供各 View 读写。
         cx.set_global(GlobalConfig(config.clone()));
         cx.set_global(GlobalTokioHandle(tokio_handle));
+
+        // 历史数据库（M10）：打开 + 按保留天数清理过期记录（任务 10.4）。
+        // 须在打开窗口前设置，便于主视图初始化时确定当前会话。
+        match history::db::HistoryDb::open() {
+            Ok(db) => {
+                match db.purge_older_than(config.text.history_retention_days) {
+                    Ok(n) if n > 0 => tracing::info!("已清理 {n} 条过期历史记录"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("清理过期历史失败: {e:#}"),
+                }
+                cx.set_global(history::GlobalHistory(db));
+            }
+            Err(e) => tracing::error!("打开历史数据库失败（历史功能将不可用）: {e:#}"),
+        }
 
         // 退出时持久化配置（含已加密的 API Key）。
         cx.on_app_quit(|cx: &mut App| {

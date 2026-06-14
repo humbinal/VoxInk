@@ -36,7 +36,7 @@ impl BackendRegistry {
     }
 
     /// 注册全部内置后端（§2.6 清单中已落地的部分）。
-    /// M4 仅有 `aliyun_bailian_offline`；M6/M7/M8 逐步补齐其余。
+    /// M4 仅有 `aliyun_bailian_offline`；M6/M7 逐步补齐其余。
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
         registry.register("aliyun_bailian_offline", || {

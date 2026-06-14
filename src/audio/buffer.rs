@@ -3,8 +3,8 @@
 //! 单生产者（cpal 音频回调）→ 单消费者（worker 线程）。缓冲区中存放**交织的**
 //! 输入采样（已转换为 f32），由消费者负责降混与重采样。
 
-use ringbuf::{HeapCons, HeapProd, HeapRb};
 use ringbuf::traits::Split;
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 /// 生产者句柄（移动进 cpal 回调）。
 pub type AudioProd = HeapProd<f32>;

@@ -73,11 +73,16 @@ ringbuf = "0.4"
 tray-icon = "0.21"
 auto-launch = "0.5"
 
+# 全局快捷键（§1.4，M9）。Tauri 团队维护，跨平台系统级热键。
+global-hotkey = "0.8"
+
 [target.'cfg(windows)'.dependencies]
-# 窗口隐藏到托盘需直接调用 Win32 ShowWindow（gpui 在 Windows 上不公开 hide/minimize）。
+# 窗口隐藏到托盘需直接调用 Win32 ShowWindow（gpui 在 Windows 上不公开 hide/minimize）；
+# 一键复制并粘贴需 SendInput 模拟 Ctrl+V（M9，Win32_UI_Input_KeyboardAndMouse）。
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 # 从 gpui Window 取 HWND。
 raw-window-handle = "0.6"

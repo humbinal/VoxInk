@@ -4,8 +4,8 @@
 //! 通知 worker 排空缓冲、收尾 WAV 并返回产物。cpal `Stream` 不跨线程移动（留在主线程）。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -13,9 +13,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use ringbuf::traits::{Consumer, Producer};
 
-use super::buffer::{AudioCons, AudioProd, new_buffer};
+use super::buffer::{new_buffer, AudioCons, AudioProd};
 use super::resample::MonoResampler;
-use super::writer::{WavSink, create_writer, temp_wav_path};
+use super::writer::{create_writer, temp_wav_path, WavSink};
 use super::{AudioError, RecordingOutcome};
 
 /// 录音会话句柄。持有 cpal 流（主线程）、停止标志与 worker 线程句柄。

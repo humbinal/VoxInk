@@ -7,9 +7,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow, bail};
-use base64::Engine;
+use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
@@ -61,8 +61,6 @@ pub struct AsrSettings {
     /// "zh" | "en" | "auto"
     pub language: String,
     pub max_recording_seconds: u32,
-    /// "base" | "small" | "medium"
-    pub local_model_size: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,7 +125,6 @@ impl Default for AsrSettings {
             api_key: String::new(),
             language: "zh".to_string(),
             max_recording_seconds: 600,
-            local_model_size: "base".to_string(),
         }
     }
 }

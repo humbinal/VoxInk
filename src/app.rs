@@ -9,16 +9,16 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    Animation, AnimationExt, AnyElement, ClickEvent, Context, Entity, Focusable, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window, div, ease_in_out, prelude::*, px, rgb,
-    white,
+    div, ease_in_out, prelude::*, px, rgb, white, Animation, AnimationExt,
+    AnyElement, ClickEvent, Context, Entity, Focusable, IntoElement, ParentElement, Render, SharedString, Styled,
+    Window,
 };
 use gpui_component::{
-    ActiveTheme, WindowExt,
-    button::{Button, ButtonVariants},
-    h_flex,
+    button::{Button, ButtonVariants}, h_flex,
     input::{Input, InputState},
     v_flex,
+    ActiveTheme,
+    WindowExt,
 };
 
 use crate::asr::traits::StreamingResult;
@@ -192,7 +192,7 @@ impl VoxInk {
                 cx.notify();
             });
         })
-        .detach();
+            .detach();
     }
 
     /// 从持久化配置构造运行期 `AsrConfig`（api_key 为内存中的明文）。
@@ -201,17 +201,28 @@ impl VoxInk {
             Some(global) => {
                 // M11 设置面板上线前，无 UI 录入 API Key；若配置为空则回退到环境变量
                 // DASHSCOPE_API_KEY，便于在当前阶段验证（明文不落盘，符合隐私优先）。
+                // 仅记录来源，绝不记录密钥本身（§5.3 日志脱敏）。
                 let api_key = if global.0.asr.api_key.trim().is_empty() {
-                    std::env::var("DASHSCOPE_API_KEY").unwrap_or_default()
+                    match std::env::var("DASHSCOPE_API_KEY") {
+                        Ok(k) if !k.trim().is_empty() => {
+                            tracing::info!("API Key 来源：环境变量 DASHSCOPE_API_KEY（配置文件未设置）");
+                            k
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "未找到 API Key：配置文件为空，且环境变量 DASHSCOPE_API_KEY 未设置或为空"
+                            );
+                            String::new()
+                        }
+                    }
                 } else {
+                    tracing::info!("API Key 来源：配置文件");
                     global.0.asr.api_key.clone()
                 };
                 AsrConfig {
                     backend_id: global.0.asr.backend_id.clone(),
                     api_key,
                     api_endpoint: global.0.asr.api_endpoint.clone(),
-                    local_model_path: None,
-                    local_model_size: Some(global.0.asr.local_model_size.clone()),
                     language: global.0.asr.language.clone(),
                     // M11 设置面板上线前，OSS 凭证经环境变量提供（大文件 filetrans 用）。
                     oss_endpoint: std::env::var("OSS_ENDPOINT").unwrap_or_default(),
@@ -295,7 +306,7 @@ impl VoxInk {
                 this.on_streaming_backend_done(done, window, cx);
             });
         })
-        .detach();
+            .detach();
     }
 
     /// 停止实时流式：收尾 WAV → 已失败则离线转写，否则等待最终结果。
@@ -418,7 +429,7 @@ impl VoxInk {
                 }
             }
         })
-        .detach();
+            .detach();
     }
 
     /// 录音时长格式化为 `MM:SS`。
@@ -448,6 +459,24 @@ impl VoxInk {
             RecordingState::Recording => self.stop_capture(window, cx, false),
             // Processing 不可点击/不可切换，理论上不会到这里。
             RecordingState::Processing => {}
+        }
+    }
+
+    /// 一键复制并粘贴：复制全部文本到剪贴板 + 模拟粘贴到前台应用（M9 任务 9.4）。
+    /// 供全局快捷键 `copy_and_paste` 调用；典型场景是焦点在其它应用、VoxInk 隐藏于托盘。
+    pub fn copy_and_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value().to_string();
+        tracing::info!(chars = text.chars().count(), "复制并粘贴热键触发");
+        if text.is_empty() {
+            window.push_notification("没有可复制的内容", cx);
+            return;
+        }
+        match copy_to_clipboard(&text) {
+            Ok(()) => crate::hotkey::simulate_paste(),
+            Err(e) => {
+                tracing::error!("复制失败: {e:#}");
+                window.push_notification("复制失败", cx);
+            }
         }
     }
 
@@ -511,7 +540,7 @@ impl VoxInk {
                         cx.notify();
                     });
                 })
-                .detach();
+                    .detach();
             }
             Err(e) => {
                 tracing::error!("复制失败: {e:#}");
@@ -549,7 +578,7 @@ impl VoxInk {
                 Err(_) => window.push_notification("连接测试中断", cx),
             });
         })
-        .detach();
+            .detach();
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {

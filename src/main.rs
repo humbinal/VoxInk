@@ -7,13 +7,14 @@ mod asr;
 mod audio;
 mod autolaunch;
 mod config;
+mod hotkey;
 mod state;
 mod tray;
 
 use anyhow::Result;
 use app::{GlobalConfig, GlobalTokioHandle, VoxInk};
 use config::VoxInkConfig;
-use gpui::{App, Bounds, Entity, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{prelude::*, px, size, App, Bounds, Entity, TitlebarOptions, WindowBounds, WindowOptions};
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 use tracing_subscriber::EnvFilter;
@@ -32,7 +33,7 @@ fn init_tracing() {
 fn main() -> Result<()> {
     init_tracing();
 
-    // 创建 Tokio 多线程运行时，供后续里程碑（音频 I/O、网络、本地推理）调度耗时任务。
+    // 创建 Tokio 多线程运行时，供音频 I/O、网络等耗时任务调度。
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -87,7 +88,7 @@ fn main() -> Result<()> {
                 }
             }
         })
-        .detach();
+            .detach();
 
         let bounds = Bounds::centered(None, size(px(480.), px(600.)), cx);
         let mut view_holder: Option<Entity<VoxInk>> = None;
@@ -114,10 +115,14 @@ fn main() -> Result<()> {
         tracing::info!("主窗口已打开");
 
         // 系统托盘集成（M5）：图标 + 菜单 + 关闭隐藏到托盘。
-        if let Some(view) = view_holder
-            && let Err(e) = tray::setup_tray(window, view, cx)
-        {
-            tracing::error!("初始化系统托盘失败: {e:#}");
+        // 全局快捷键（M9）：录音切换 / 窗口切换 / 复制并粘贴。
+        if let Some(view) = view_holder {
+            if let Err(e) = tray::setup_tray(window, view.clone(), cx) {
+                tracing::error!("初始化系统托盘失败: {e:#}");
+            }
+            if let Err(e) = hotkey::setup_hotkeys(window, view, &config.shortcuts, cx) {
+                tracing::error!("初始化全局快捷键失败: {e:#}");
+            }
         }
 
         // 启动最小化到托盘（首次运行仍显示主窗口，便于初次使用）。

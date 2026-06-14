@@ -4,8 +4,8 @@
 //! **同时写本地 WAV**，供实时识别失败时回退离线转写（数据不丢失，§4.2.1）。
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ use tokio::sync::mpsc::Sender;
 use super::buffer::AudioCons;
 use super::capture::open_capture;
 use super::resample::MonoResampler;
-use super::writer::{WavSink, create_writer, temp_wav_path};
+use super::writer::{create_writer, temp_wav_path, WavSink};
 use super::{AudioError, RecordingOutcome};
 
 /// 16kHz 下 100ms = 1600 样本；i16 即 3200 字节。

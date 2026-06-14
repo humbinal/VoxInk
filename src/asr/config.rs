@@ -13,10 +13,6 @@ pub struct AsrConfig {
     pub api_key: String,
     /// API Endpoint
     pub api_endpoint: String,
-    /// 本地引擎模型路径（qwen-asr），云后端为 None
-    pub local_model_path: Option<String>,
-    /// qwen-asr 模型规格（见 §4.3.3）
-    pub local_model_size: Option<String>,
     /// 语言代码（"zh" / "en" / "auto"）
     pub language: String,
 

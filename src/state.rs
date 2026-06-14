@@ -11,20 +11,15 @@ pub enum RecordingState {
     /// 空闲，等待用户操作
     Idle,
     /// 正在录音
-    // 由 M2 录音按钮状态机构造（§4.1.2）。
-    #[allow(dead_code)]
     Recording,
-    /// 正在处理（上传转写 / 本地推理）
-    // 由 M2/M4 在转写阶段构造（§4.1.2）。
-    #[allow(dead_code)]
+    /// 正在处理（上传转写）
     Processing,
 }
 
 /// 转录处理模式（用户在主界面切换）。
 ///
 /// 语义：此枚举描述"如何处理音频数据"，而非"由谁识别"。
-/// "由谁识别"（云端/本地）由 `AsrConfig.backend_id` 决定（见 §2.5）。
-/// 本地后端（qwen-asr）当前仅支持 Offline 模式。
+/// "由谁识别"（云端后端）由 `AsrConfig.backend_id` 决定（见 §2.5）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TranscriptionMode {

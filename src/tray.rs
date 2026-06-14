@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use gpui::{App, Entity, Window, WindowHandle};
 use gpui_component::Root;
 
@@ -102,6 +102,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                     // 经 AnyWindowHandle::update 取 Window 而**不租借 Root 视图**：
                     // toggle_recording 内部会 push_notification（更新 Root），若此处已租借 Root
                     // 会触发"cannot update Root while it is already being updated"双重租借 panic。
+                    // `*window` 借 WindowHandle<Root> 的 Deref 得到 AnyWindowHandle。
                     let any_window = *window;
                     let _ = any_window.update(cx, |_, win, app| {
                         view.update(app, |view, vcx| {
@@ -114,7 +115,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
             }
         }
     })
-    .detach();
+        .detach();
 
     Ok(())
 }
@@ -123,6 +124,13 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
 pub fn hide_to_tray(window: &Window) {
     if let Some(h) = window_hwnd(window) {
         hide_window(h);
+    }
+}
+
+/// 切换主窗口显隐（供全局快捷键"唤起/隐藏窗口"调用，M9）。
+pub fn toggle_window_visibility(window: &Window) {
+    if let Some(h) = window_hwnd(window) {
+        toggle_window(h);
     }
 }
 
@@ -206,7 +214,7 @@ mod winimpl {
 
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsWindowVisible, SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow,
+        IsWindowVisible, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
     };
 
     fn hwnd(h: isize) -> HWND {

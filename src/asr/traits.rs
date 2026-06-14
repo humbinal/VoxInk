@@ -1,6 +1,6 @@
 //! ASR 后端契约 —— §2.2（Tier 1）。
 //!
-//! 所有后端（云服务、本地引擎、自定义服务）必须实现 `AsrBackend`。
+//! 所有后端（云服务、自定义服务）必须实现 `AsrBackend`。
 //!
 //! 关于 `#[async_trait]`：当前 Rust 原生 async fn in trait 不是 dyn-compatible，
 //! 而注册表需要 `Arc<dyn AsrBackend>`（trait 对象），故使用 `async_trait` 宏装箱
@@ -14,16 +14,13 @@ use super::error::AsrError;
 /// ASR 后端统一接口。
 ///
 /// 约束：Send + Sync（线程间安全传递）+ 'static（可放入 tokio::spawn）。
-/// `validate_config`（M7 连接测试）与 `transcribe_streaming`（M6 流式）M4 尚未调用，
-/// 故允许 dead_code 以保持契约完整。
 #[async_trait]
-#[allow(dead_code)]
 pub trait AsrBackend: Send + Sync + 'static {
     /// 后端唯一标识符，对应 `AsrConfig.backend_id`。
-    /// 示例: "aliyun_bailian_streaming", "qwen_asr_local"
+    /// 示例: "aliyun_bailian_streaming", "generic_ws"
     fn backend_id(&self) -> &str;
 
-    /// 用户可见的后端名称。示例: "阿里云百炼（实时）", "本地 qwen-asr"
+    /// 用户可见的后端名称。示例: "阿里云百炼（实时）", "通用 WebSocket"
     fn display_name(&self) -> &str;
 
     /// 本后端是否支持实时流式识别。

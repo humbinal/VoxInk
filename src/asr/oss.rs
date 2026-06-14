@@ -3,8 +3,8 @@
 //! 上传为私有对象，再生成**预签名 GET URL** 供 DashScope 拉取（避免对象公开，符合隐私优先）。
 //! 仅实现本场景所需的 PUT 上传与 GET 预签名，不是通用 OSS SDK。
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;

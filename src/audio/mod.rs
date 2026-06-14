@@ -18,7 +18,7 @@ use std::time::Duration;
 pub use capture::Recorder;
 pub use chunk_sender::StreamingCapture;
 
-/// ASR 与本地引擎统一要求的目标采样率（§4.2.3 / §4.1）。
+/// ASR 统一要求的目标采样率（§4.1）。
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 /// 音频子系统错误（任务 3.1：设备不可用返回明确错误类型）。

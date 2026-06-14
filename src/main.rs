@@ -2,23 +2,34 @@
 //!
 //! 职责：初始化日志、创建 Tokio 运行时、加载/保存配置、启动 GPUI 并打开主窗口（800×600）。
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod asr;
 mod audio;
 mod autolaunch;
 mod config;
+mod diagnostics;
 mod history;
 mod hotkey;
+mod i18n;
+mod settings;
 mod state;
+mod theme;
 mod tray;
 
 use anyhow::Result;
 use app::{GlobalConfig, GlobalTokioHandle, VoxInk};
 use config::VoxInkConfig;
-use gpui::{prelude::*, px, size, App, Bounds, Entity, TitlebarOptions, WindowBounds, WindowOptions};
+use gpui::{
+    prelude::*, px, size, App, Bounds, Entity, TitlebarOptions, WindowBounds, WindowOptions,
+};
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 use tracing_subscriber::EnvFilter;
+
+// 多语言词典（编译期嵌入 crate 根 `locales/`），缺省回退简体中文（M11 任务 11.3）。
+rust_i18n::i18n!("locales", fallback = "zh-CN");
 
 fn init_tracing() {
     // 默认：应用自身 INFO；屏蔽 gpui Windows 后端的伪错误噪声 ——
@@ -69,9 +80,8 @@ fn main() -> Result<()> {
         // 初始化 gpui-component（主题、输入、菜单等子系统）。
         gpui_component::init(cx);
 
-        // 将 gpui-component 内置文案设为简体中文（右键菜单剪切/复制/粘贴、对话框按钮等）。
-        // 其 locale 默认 "en" 且与系统语言无关；M11 将改为跟随配置项 general.language。
-        gpui_component::set_locale("zh-CN");
+        // 按配置应用界面语言（设置全局 locale；同时影响 gpui-component 内置文案）。
+        i18n::apply_locale(&config.general.language);
 
         // 配置以全局形式承载，供各 View 读写。
         cx.set_global(GlobalConfig(config.clone()));
@@ -103,7 +113,7 @@ fn main() -> Result<()> {
                 }
             }
         })
-            .detach();
+        .detach();
 
         // 窗口尺寸取自配置（无配置文件用默认值，§6.1）。
         let bounds = Bounds::centered(

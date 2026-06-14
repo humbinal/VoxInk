@@ -11,9 +11,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    div, ease_in_out, prelude::*, px, rgb, white, Animation, AnimationExt, AnyElement, ClickEvent,
-    Context, Entity, Focusable, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window,
+    div, ease_in_out, prelude::*, px, rgb, white, Animation, AnimationExt, AnyElement, App,
+    ClickEvent, Context, Entity, Focusable, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -28,6 +28,8 @@ use crate::audio::{AudioError, Recorder, StreamingCapture};
 use crate::config::VoxInkConfig;
 use crate::history::db::Record;
 use crate::history::GlobalHistory;
+use crate::i18n::tr;
+use crate::settings::{SettingsEvent, SettingsView};
 use crate::state::{AppState, RecordingState, TranscriptionMode};
 
 /// 以全局形式承载持久化配置，便于跨 View 读写、退出时统一保存。
@@ -69,7 +71,11 @@ pub struct VoxInk {
     streaming_duration_secs: u32,
     /// 自动保存防抖代际计数（仅最新一次定时器生效）。
     autosave_gen: u64,
-    /// 订阅句柄（编辑器/搜索变更）保活。
+    /// 设置面板覆盖层视图（M11）。
+    settings: Entity<SettingsView>,
+    /// 是否显示设置面板覆盖层。
+    show_settings: bool,
+    /// 订阅句柄（编辑器/搜索/设置事件）保活。
     _subs: Vec<Subscription>,
 }
 
@@ -83,15 +89,19 @@ impl VoxInk {
         let editor = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
-                .placeholder("点击「开始录音」用语音输入提示词，或直接在此编辑……")
+                .placeholder(tr("editor.placeholder"))
         });
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索记录…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("sidebar.search")));
 
-        // 初始转录模式取自持久化配置（§2.7 default_mode）。
+        // 初始转录模式与主题取自持久化配置。
         let mut state = AppState::default();
+        let mut theme_str = "system".to_string();
         if let Some(global) = cx.try_global::<GlobalConfig>() {
             state.transcription_mode = global.0.asr.default_mode;
+            theme_str = global.0.general.theme.clone();
         }
+        // 启动应用主题（M11 任务 11.2）。
+        crate::theme::apply(&theme_str, window, cx);
 
         // 启动默认打开最近一条记录；库为空则新建一条空记录（§4.3.3）。
         let (current_record_id, initial_text, records) = match cx.try_global::<GlobalHistory>() {
@@ -133,6 +143,17 @@ impl VoxInk {
             }
         });
 
+        // 设置面板覆盖层 + 关闭事件订阅（M11）。
+        let settings = cx.new(|scx| SettingsView::new(window, scx));
+        let settings_sub = cx.subscribe(&settings, |this, _s, event: &SettingsEvent, cx| {
+            match event {
+                SettingsEvent::Closed => {
+                    this.show_settings = false;
+                    cx.notify();
+                }
+            }
+        });
+
         Self {
             state,
             editor,
@@ -145,7 +166,9 @@ impl VoxInk {
             streaming_fallback: false,
             streaming_duration_secs: 0,
             autosave_gen: 0,
-            _subs: vec![editor_sub, search_sub],
+            settings,
+            show_settings: false,
+            _subs: vec![editor_sub, search_sub, settings_sub],
         }
     }
 
@@ -387,7 +410,7 @@ impl VoxInk {
         cx.notify();
         window.push_notification("正在识别…", cx);
 
-        let asr_config = self.build_asr_config(cx);
+        let asr_config = runtime_asr_config(cx, false);
         let Some(global_handle) = cx.try_global::<GlobalTokioHandle>() else {
             tracing::error!("缺少 Tokio runtime 句柄，无法转写");
             self.state.recording_state = RecordingState::Idle;
@@ -429,51 +452,12 @@ impl VoxInk {
         .detach();
     }
 
-    /// 从持久化配置构造运行期 `AsrConfig`（api_key 为内存中的明文）。
-    fn build_asr_config(&self, cx: &Context<Self>) -> AsrConfig {
-        match cx.try_global::<GlobalConfig>() {
-            Some(global) => {
-                // M11 设置面板上线前，无 UI 录入 API Key；若配置为空则回退到环境变量
-                // DASHSCOPE_API_KEY，便于在当前阶段验证（明文不落盘，符合隐私优先）。
-                // 仅记录来源，绝不记录密钥本身（§5.3 日志脱敏）。
-                let api_key = if global.0.asr.api_key.trim().is_empty() {
-                    match std::env::var("DASHSCOPE_API_KEY") {
-                        Ok(k) if !k.trim().is_empty() => {
-                            tracing::info!("API Key 来源：环境变量 DASHSCOPE_API_KEY（配置文件未设置）");
-                            k
-                        }
-                        _ => {
-                            tracing::warn!(
-                                "未找到 API Key：配置文件为空，且环境变量 DASHSCOPE_API_KEY 未设置或为空"
-                            );
-                            String::new()
-                        }
-                    }
-                } else {
-                    tracing::info!("API Key 来源：配置文件");
-                    global.0.asr.api_key.clone()
-                };
-                AsrConfig {
-                    backend_id: global.0.asr.backend_id.clone(),
-                    api_key,
-                    api_endpoint: global.0.asr.api_endpoint.clone(),
-                    language: global.0.asr.language.clone(),
-                    // M11 设置面板上线前，OSS 凭证经环境变量提供（大文件 filetrans 用）。
-                    oss_endpoint: std::env::var("OSS_ENDPOINT").unwrap_or_default(),
-                    oss_bucket: std::env::var("OSS_BUCKET").unwrap_or_default(),
-                    oss_access_key_id: std::env::var("OSS_ACCESS_KEY_ID").unwrap_or_default(),
-                    oss_access_key_secret: std::env::var("OSS_ACCESS_KEY_SECRET").unwrap_or_default(),
-                }
-            }
-            None => AsrConfig::default(),
-        }
-    }
 
     // ───────────────────────────── 实时流式（M6）─────────────────────────────
 
     /// 开始实时流式识别：流式采集 + WS 后端 + 增量结果回 UI。
     fn start_streaming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let config = self.build_asr_config(cx);
+        let config = runtime_asr_config(cx, true);
         if config.api_key.trim().is_empty() {
             window.push_notification(
                 "未配置 API Key（设置环境变量 DASHSCOPE_API_KEY 或在设置中填写）",
@@ -511,8 +495,8 @@ impl VoxInk {
         cx.notify();
         window.push_notification("实时识别中…", cx);
 
-        // 按配置 backend_id 选流式后端（默认百炼实时）；只依赖 trait + 注册表。
-        let streaming_backend_id = resolve_backend_id(&config, true, None);
+        // 用配置选定的流式后端（用户在设置中选择）；只依赖 trait + 注册表。
+        let streaming_backend_id = config.backend_id.clone();
         handle.spawn(async move {
             let registry = BackendRegistry::with_builtins();
             let result = match registry.get(&streaming_backend_id) {
@@ -682,9 +666,9 @@ impl VoxInk {
     /// 当前状态的文字与指示色（§6.3）。
     fn status(&self) -> (SharedString, gpui::Rgba) {
         match self.state.recording_state {
-            RecordingState::Idle => ("就绪".into(), rgb(0x27AE60)),
-            RecordingState::Recording => ("录音中".into(), rgb(0xE74C3C)),
-            RecordingState::Processing => ("识别中".into(), rgb(0xF39C12)),
+            RecordingState::Idle => (tr("status.idle").into(), rgb(0x27AE60)),
+            RecordingState::Recording => (tr("status.recording").into(), rgb(0xE74C3C)),
+            RecordingState::Processing => (tr("status.processing").into(), rgb(0xF39C12)),
         }
     }
 
@@ -790,36 +774,12 @@ impl VoxInk {
         }
     }
 
+    /// 打开设置面板覆盖层（M11）：用当前配置填充输入框后显示。
     fn on_open_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // M7 临时：把「设置」按钮用作"测试连接"（正式设置面板在 M11，§6.4）。
-        let config = self.build_asr_config(cx);
-        let want_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
-        let backend_id = resolve_backend_id(&config, want_streaming, None);
-        let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
-            return;
-        };
-        window.push_notification(format!("正在测试连接（{backend_id}）…"), cx);
-
-        cx.spawn_in(window, async move |this, cx| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            handle.spawn(async move {
-                let registry = BackendRegistry::with_builtins();
-                let result = match registry.get(&backend_id) {
-                    Some(backend) => backend.validate_config(&config).await,
-                    None => Err(AsrError::InvalidConfig("未找到后端".to_string())),
-                };
-                let _ = tx.send(result);
-            });
-            let outcome = rx.await;
-            let _ = this.update_in(cx, |_this, window, cx| match outcome {
-                Ok(Ok(())) => window.push_notification("连接测试成功 ✓", cx),
-                Ok(Err(e)) => {
-                    window.push_notification(format!("连接测试失败：{}", friendly_asr_error(&e)), cx)
-                }
-                Err(_) => window.push_notification("连接测试中断", cx),
-            });
-        })
-        .detach();
+        self.settings
+            .update(cx, |panel, pcx| panel.load_from_config(window, pcx));
+        self.show_settings = true;
+        cx.notify();
     }
 
     /// 导出全部记录为 JSON（写入配置目录，Toast 路径；任务 10.4）。
@@ -911,7 +871,7 @@ impl VoxInk {
             .rounded(px(8.))
             .bg(cx.theme().accent)
             .text_color(cx.theme().accent_foreground)
-            .child("＋ 新建");
+            .child(tr("sidebar.new"));
         if is_idle {
             btn = btn
                 .cursor_pointer()
@@ -940,7 +900,7 @@ impl VoxInk {
                     .py_3()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("暂无记录"),
+                    .child(tr("sidebar.empty")),
             );
         }
 
@@ -958,7 +918,7 @@ impl VoxInk {
                         .pb_1()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(bucket),
+                        .child(tr(bucket)),
                 );
             }
             list = list.child(self.render_record_item(rec, &current, is_idle, cx));
@@ -1049,9 +1009,9 @@ impl VoxInk {
     /// 录音按钮：按状态变色/变字；Recording 时叠加脉冲呼吸动画；Processing 不可点击。
     fn render_record_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let (bg, label, clickable) = match self.state.recording_state {
-            RecordingState::Idle => (rgb(0x27AE60), "🎤 开始录音", true),
-            RecordingState::Recording => (rgb(0xE74C3C), "⏹ 停止录音", true),
-            RecordingState::Processing => (rgb(0xF39C12), "⏳ 处理中…", false),
+            RecordingState::Idle => (rgb(0x27AE60), tr("record.start"), true),
+            RecordingState::Recording => (rgb(0xE74C3C), tr("record.stop"), true),
+            RecordingState::Processing => (rgb(0xF39C12), tr("record.processing"), false),
         };
 
         let mut button = div()
@@ -1114,7 +1074,7 @@ impl VoxInk {
                         Button::new("mode-streaming")
                             .when(is_streaming, |b| b.primary())
                             .when(!is_streaming, |b| b.outline())
-                            .label("实时")
+                            .label(tr("mode.streaming"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.on_select_mode(TranscriptionMode::Streaming, cx)
                             })),
@@ -1123,7 +1083,7 @@ impl VoxInk {
                         Button::new("mode-offline")
                             .when(!is_streaming, |b| b.primary())
                             .when(is_streaming, |b| b.outline())
-                            .label("离线")
+                            .label(tr("mode.offline"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.on_select_mode(TranscriptionMode::Offline, cx)
                             })),
@@ -1177,14 +1137,14 @@ impl VoxInk {
             .border_color(cx.theme().border)
             .text_sm()
             .text_color(cx.theme().muted_foreground)
-            .child(format!("字数: {char_count}"))
+            .child(format!("{}: {char_count}", tr("footer.words")))
             .child(
                 Button::new("copy")
                     .primary()
                     .label(if self.copied {
-                        "✓ 已复制"
+                        tr("footer.copied")
                     } else {
-                        "📋 一键复制"
+                        tr("footer.copy")
                     })
                     .on_click(cx.listener(Self::on_copy)),
             )
@@ -1217,6 +1177,8 @@ impl Render for VoxInk {
                             .child(self.render_footer(cx)),
                     ),
             )
+            // 设置面板覆盖层（M11）：显示时盖在主界面之上。
+            .when(self.show_settings, |this| this.child(self.settings.clone()))
             .children(notification_layer)
             .children(dialog_layer)
     }
@@ -1232,18 +1194,15 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// 同步接口（qwen3-asr-flash）的原始音频上限：base64 后约 10MB，对应原始约 7MB。
-/// 超过则改走大文件异步后端（filetrans + OSS）。
-const SYNC_OFFLINE_MAX_BYTES: usize = 7 * 1024 * 1024;
-
-/// 读取 WAV → 按配置 backend_id + 大小选离线后端 → 转写（在 Tokio 运行时执行）。
+/// 读取 WAV → 用配置选定的离线后端转写（在 Tokio 运行时执行）。
+/// 后端由用户在设置中显式选择（`offline_backend`）；不再按音频大小自动切换。
 async fn run_offline_transcription(
     config: AsrConfig,
     wav_path: PathBuf,
 ) -> Result<String, AsrError> {
     let audio = tokio::fs::read(&wav_path).await?;
-    let backend_id = resolve_backend_id(&config, false, Some(audio.len()));
-    tracing::info!(%backend_id, bytes = audio.len(), "选择离线转写后端");
+    let backend_id = config.backend_id.clone();
+    tracing::info!(%backend_id, bytes = audio.len(), "离线转写后端");
 
     let registry = BackendRegistry::with_builtins();
     let backend = registry
@@ -1252,42 +1211,36 @@ async fn run_offline_transcription(
     backend.transcribe_offline(&config, audio).await
 }
 
-/// 按配置 `backend_id` 与能力（流式/离线）+ 音频大小，解析出实际使用的后端 id。
-/// 仅依赖注册表枚举的能力，新增后端无需改此处（开闭原则，§7.3）。
-fn resolve_backend_id(config: &AsrConfig, want_streaming: bool, audio_len: Option<usize>) -> String {
-    let registry = BackendRegistry::with_builtins();
-    let supports = |id: &str| {
-        registry
-            .get(id)
-            .map(|b| {
-                if want_streaming {
-                    b.supports_streaming()
-                } else {
-                    b.supports_offline()
-                }
-            })
-            .unwrap_or(false)
+/// 从持久化配置构造运行期 `AsrConfig`（供主视图与设置面板共用）。
+/// 按 `want_streaming` 选用对应模式的后端（streaming_backend / offline_backend），并取该后端的独立配置；
+/// 后端 api_key/OSS 为空时回退到环境变量（`DASHSCOPE_API_KEY` / `OSS_*`）。api_key 为内存明文（§5.3 不记录值）。
+pub(crate) fn runtime_asr_config(cx: &App, want_streaming: bool) -> AsrConfig {
+    let Some(global) = cx.try_global::<GlobalConfig>() else {
+        return AsrConfig::default();
     };
-
-    let configured = config.backend_id.trim();
-    if !configured.is_empty() && supports(configured) {
-        // 百炼离线同步后端的大文件特例：透明改用 filetrans。
-        if !want_streaming
-            && configured == "aliyun_bailian_offline"
-            && audio_len.is_some_and(|len| len > SYNC_OFFLINE_MAX_BYTES)
-        {
-            return "aliyun_bailian_filetrans".to_string();
-        }
-        return configured.to_string();
-    }
-
-    // 配置无效/不支持该模式 → 合理默认。
-    if want_streaming {
-        "aliyun_bailian_streaming".to_string()
-    } else if audio_len.is_some_and(|len| len > SYNC_OFFLINE_MAX_BYTES) {
-        "aliyun_bailian_filetrans".to_string()
+    let asr = &global.0.asr;
+    let backend_id = if want_streaming {
+        asr.streaming_backend.clone()
     } else {
-        "aliyun_bailian_offline".to_string()
+        asr.offline_backend.clone()
+    };
+    let bs = asr.backend(&backend_id);
+    let or_env = |v: &str, env_key: &str| {
+        if v.trim().is_empty() {
+            std::env::var(env_key).unwrap_or_default()
+        } else {
+            v.to_string()
+        }
+    };
+    AsrConfig {
+        backend_id,
+        api_key: or_env(&bs.api_key, "DASHSCOPE_API_KEY"),
+        api_endpoint: bs.endpoint.clone(),
+        language: asr.language.clone(),
+        oss_endpoint: or_env(&bs.oss_endpoint, "OSS_ENDPOINT"),
+        oss_bucket: or_env(&bs.oss_bucket, "OSS_BUCKET"),
+        oss_access_key_id: or_env(&bs.oss_access_key_id, "OSS_ACCESS_KEY_ID"),
+        oss_access_key_secret: or_env(&bs.oss_access_key_secret, "OSS_ACCESS_KEY_SECRET"),
     }
 }
 
@@ -1340,20 +1293,20 @@ fn record_bucket(created_at: &str) -> &'static str {
     let date = dt.with_timezone(&Local).date_naive();
     let days = (Local::now().date_naive() - date).num_days();
     if days <= 0 {
-        "今天"
+        "group.today"
     } else if days == 1 {
-        "昨天"
+        "group.yesterday"
     } else if days <= 7 {
-        "近 7 天"
+        "group.last7"
     } else if days <= 30 {
-        "近 30 天"
+        "group.last30"
     } else {
-        "更早"
+        "group.older"
     }
 }
 
 /// 把 `AsrError` 映射为用户友好的中文提示（任务 4.5）。
-fn friendly_asr_error(error: &AsrError) -> String {
+pub(crate) fn friendly_asr_error(error: &AsrError) -> String {
     match error {
         AsrError::AuthError => "API Key 无效或未配置，请在设置中检查".to_string(),
         AsrError::QuotaExceeded(_) => "API 配额已用尽".to_string(),

@@ -1,0 +1,197 @@
+_version: 2
+
+# 录音控制
+record.start:
+  zh-CN: 🎤 开始录音
+  en: 🎤 Start
+record.stop:
+  zh-CN: ⏹ 停止录音
+  en: ⏹ Stop
+record.processing:
+  zh-CN: ⏳ 处理中…
+  en: ⏳ Processing…
+mode.streaming:
+  zh-CN: 实时
+  en: Realtime
+mode.offline:
+  zh-CN: 离线
+  en: Offline
+status.idle:
+  zh-CN: 就绪
+  en: Ready
+status.recording:
+  zh-CN: 录音中
+  en: Recording
+status.processing:
+  zh-CN: 识别中
+  en: Transcribing
+
+# 左侧记录栏
+sidebar.new:
+  zh-CN: ＋ 新建
+  en: ＋ New
+sidebar.search:
+  zh-CN: 搜索记录…
+  en: Search records…
+sidebar.empty:
+  zh-CN: 暂无记录
+  en: No records
+group.today:
+  zh-CN: 今天
+  en: Today
+group.yesterday:
+  zh-CN: 昨天
+  en: Yesterday
+group.last7:
+  zh-CN: 近 7 天
+  en: Last 7 days
+group.last30:
+  zh-CN: 近 30 天
+  en: Last 30 days
+group.older:
+  zh-CN: 更早
+  en: Older
+
+# 编辑区 / 底栏
+editor.placeholder:
+  zh-CN: 点击「开始录音」用语音输入提示词，或直接在此编辑……
+  en: Click "Start" to dictate your prompt, or type here…
+footer.words:
+  zh-CN: 字数
+  en: Words
+footer.copy:
+  zh-CN: 📋 一键复制
+  en: 📋 Copy
+footer.copied:
+  zh-CN: ✓ 已复制
+  en: ✓ Copied
+
+# 设置面板
+settings.title:
+  zh-CN: 设置
+  en: Settings
+settings.done:
+  zh-CN: 完成
+  en: Done
+settings.section.asr:
+  zh-CN: ASR 服务
+  en: ASR Service
+settings.backend:
+  zh-CN: 识别后端
+  en: Backend
+settings.streaming_backend:
+  zh-CN: 实时识别后端
+  en: Realtime backend
+settings.offline_backend:
+  zh-CN: 离线识别后端
+  en: Offline backend
+settings.oss_endpoint:
+  zh-CN: OSS Endpoint
+  en: OSS Endpoint
+settings.oss_bucket:
+  zh-CN: OSS Bucket
+  en: OSS Bucket
+settings.oss_ak_id:
+  zh-CN: OSS AccessKey ID
+  en: OSS AccessKey ID
+settings.oss_ak_secret:
+  zh-CN: OSS AccessKey Secret
+  en: OSS AccessKey Secret
+settings.oss_hint:
+  zh-CN: 大文件后端需先上传到你的 OSS 中转
+  en: Large-file backend uploads to your OSS first
+settings.api_key:
+  zh-CN: API Key
+  en: API Key
+settings.api_key_ph:
+  zh-CN: 留空则用环境变量 DASHSCOPE_API_KEY
+  en: Empty = use env DASHSCOPE_API_KEY
+settings.endpoint:
+  zh-CN: 接入地址 (Endpoint)
+  en: Endpoint
+settings.test:
+  zh-CN: 测试连接
+  en: Test connection
+settings.section.recording:
+  zh-CN: 录音
+  en: Recording
+settings.default_mode:
+  zh-CN: 默认模式
+  en: Default mode
+settings.auto_copy:
+  zh-CN: 转写完成后自动复制
+  en: Auto-copy after transcription
+settings.audio_feedback:
+  zh-CN: 提示音
+  en: Sound feedback
+settings.max_seconds:
+  zh-CN: 最长录音时长（秒）
+  en: Max recording seconds
+settings.section.general:
+  zh-CN: 通用
+  en: General
+settings.autostart:
+  zh-CN: 开机自启动
+  en: Launch at startup
+settings.minimized:
+  zh-CN: 启动时最小化到托盘
+  en: Start minimized to tray
+settings.on_top:
+  zh-CN: 窗口置顶
+  en: Always on top
+settings.theme:
+  zh-CN: 主题
+  en: Theme
+settings.language:
+  zh-CN: 语言
+  en: Language
+theme.light:
+  zh-CN: 浅色
+  en: Light
+theme.dark:
+  zh-CN: 深色
+  en: Dark
+theme.system:
+  zh-CN: 跟随系统
+  en: System
+settings.section.shortcuts:
+  zh-CN: 全局快捷键
+  en: Global shortcuts
+shortcut.toggle_recording:
+  zh-CN: 开始/停止录音
+  en: Start/stop recording
+shortcut.toggle_window:
+  zh-CN: 显示/隐藏窗口
+  en: Show/hide window
+shortcut.copy_paste:
+  zh-CN: 复制并粘贴到前台
+  en: Copy & paste to foreground
+settings.shortcuts_hint:
+  zh-CN: （编辑 config.toml 的 [shortcuts] 后重启生效）
+  en: (Edit [shortcuts] in config.toml, restart to apply)
+settings.section.about:
+  zh-CN: 关于
+  en: About
+about.version:
+  zh-CN: 版本
+  en: Version
+about.build:
+  zh-CN: 构建时间
+  en: Build time
+about.commit:
+  zh-CN: Git 提交
+  en: Git commit
+about.export_diag:
+  zh-CN: 导出诊断信息
+  en: Export diagnostics
+about.license:
+  zh-CN: 开源协议
+  en: License
+
+# 通用提示
+settings.saved:
+  zh-CN: 设置已保存
+  en: Settings saved
+settings.open:
+  zh-CN: 设置
+  en: Settings

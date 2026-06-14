@@ -4,6 +4,7 @@
 //! - 敏感字段 `asr.api_key` 以 AES-256-GCM 加密落盘，明文仅存在于内存（§8.3）。
 //! - 加载时不存在则返回默认值；保存时自动加密 API Key。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -49,18 +50,46 @@ pub struct GeneralConfig {
 ///
 /// 注意：这与运行期的 `AsrConfig`（§2.5，M4 落地）是不同的类型——
 /// 持久化配置含 `default_mode` / `max_recording_seconds` 等界面级设置。
+///
+/// 2026-06-14 重构：实时(streaming) 与离线(offline) 各自独立选择后端实现，且**每个后端**有独立配置
+/// （endpoint、api_key；大文件后端另含 OSS 参数）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AsrSettings {
-    pub backend_id: String,
     /// 默认转录模式，对应 `TranscriptionMode`
     pub default_mode: TranscriptionMode,
-    pub api_endpoint: String,
-    /// 加密存储（§8.3）。内存中为明文，落盘前加密。
-    pub api_key: String,
     /// "zh" | "en" | "auto"
     pub language: String,
     pub max_recording_seconds: u32,
+    /// 实时模式选用的后端 id（须支持流式）。
+    pub streaming_backend: String,
+    /// 离线模式选用的后端 id（须支持离线）。
+    pub offline_backend: String,
+    /// 各后端的独立配置（按后端 id 索引）。BTreeMap 保证序列化顺序稳定。
+    pub backends: BTreeMap<String, BackendSettings>,
+}
+
+/// 单个后端的独立配置（§2.7 的 `[asr.backends.<id>]`）。
+/// 敏感字段 `api_key` / `oss_access_key_secret` 落盘前加密（§8.3），内存中为明文。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackendSettings {
+    /// API Key（云服务）。留空则运行期回退到环境变量 `DASHSCOPE_API_KEY`（阿里云后端）。
+    pub api_key: String,
+    /// 接入地址；留空则用后端内置默认值。
+    pub endpoint: String,
+    /// 以下仅大文件后端 `aliyun_bailian_filetrans` 需要（OSS 中转）。
+    pub oss_endpoint: String,
+    pub oss_bucket: String,
+    pub oss_access_key_id: String,
+    pub oss_access_key_secret: String,
+}
+
+impl AsrSettings {
+    /// 取某后端的配置副本（不存在则返回该后端的默认值）。
+    pub fn backend(&self, id: &str) -> BackendSettings {
+        self.backends.get(id).cloned().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,12 +148,12 @@ impl Default for GeneralConfig {
 impl Default for AsrSettings {
     fn default() -> Self {
         Self {
-            backend_id: "aliyun_bailian_streaming".to_string(),
             default_mode: TranscriptionMode::Streaming,
-            api_endpoint: "wss://dashscope.aliyuncs.com/api-ws/v1/inference".to_string(),
-            api_key: String::new(),
             language: "zh".to_string(),
             max_recording_seconds: 600,
+            streaming_backend: "aliyun_bailian_streaming".to_string(),
+            offline_backend: "aliyun_bailian_offline".to_string(),
+            backends: BTreeMap::new(),
         }
     }
 }
@@ -202,12 +231,19 @@ impl VoxInkConfig {
             }
         };
 
-        // 解密 API Key（失败则清空，不阻断启动）。
-        match decrypt_api_key(&config.asr.api_key) {
-            Ok(plain) => config.asr.api_key = plain,
-            Err(e) => {
-                tracing::warn!("API Key 解密失败（可能更换了设备），已清空: {e:#}");
-                config.asr.api_key = String::new();
+        // 解密各后端的敏感字段（失败则清空该字段，不阻断启动）。
+        for (id, b) in config.asr.backends.iter_mut() {
+            for (field, value) in [
+                ("api_key", &mut b.api_key),
+                ("oss_access_key_secret", &mut b.oss_access_key_secret),
+            ] {
+                match decrypt_api_key(value) {
+                    Ok(plain) => *value = plain,
+                    Err(e) => {
+                        tracing::warn!("后端 {id} 的 {field} 解密失败（可能更换了设备），已清空: {e:#}");
+                        value.clear();
+                    }
+                }
             }
         }
 
@@ -224,7 +260,10 @@ impl VoxInkConfig {
 
         // 仅在副本上加密，保持内存中的明文不变。
         let mut to_store = self.clone();
-        to_store.asr.api_key = encrypt_api_key(&self.asr.api_key)?;
+        for b in to_store.asr.backends.values_mut() {
+            b.api_key = encrypt_api_key(&b.api_key)?;
+            b.oss_access_key_secret = encrypt_api_key(&b.oss_access_key_secret)?;
+        }
 
         let text = toml::to_string_pretty(&to_store).context("序列化配置为 TOML 失败")?;
         fs::write(&path, text).with_context(|| format!("写入配置失败: {}", path.display()))?;

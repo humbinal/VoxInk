@@ -314,8 +314,9 @@ pub struct AsrConfig {
 
 > 📝 **M4 落地扩展（OSS 字段）**：`aliyun_bailian_filetrans`（大文件异步）只接受公网 URL，需先把本地 WAV
 > 上传到用户 OSS。为此 `AsrConfig` 新增四个 OSS 字段（语义不变，仅追加）：`oss_endpoint`、`oss_bucket`、
-> `oss_access_key_id`、`oss_access_key_secret`。M4 阶段由环境变量填充（`OSS_ENDPOINT` / `OSS_BUCKET` /
-> `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET`）；M11 设置面板上线后改由加密配置提供（secret 需加密落盘）。
+> `oss_access_key_id`、`oss_access_key_secret`。**M11（2026-06-14）**起由设置面板在
+> `aliyun_bailian_filetrans` 后端配置项下提供并加密落盘（`oss_access_key_secret` 加密，见 §2.7）；
+> 仍保留环境变量回退（`OSS_ENDPOINT` / `OSS_BUCKET` / `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET`）。
 
 ### 2.6 后端注册表与内置后端契约
 
@@ -333,7 +334,9 @@ pub struct AsrConfig {
 > 📝 **M4 落地修订（离线后端拆为同步/大文件两种）**：阿里云百炼无"上传本地字节即同步返回"的单一离线接口。
 > - `aliyun_bailian_offline`：**Qwen3-ASR-Flash** 同步接口，base64 内联本地音频，≤10MB（约 3-4 分钟）。
 > - `aliyun_bailian_filetrans`：**qwen3-asr-flash-filetrans** 异步接口，仅接受公网 URL、不支持本地上传，故需先把 WAV 上传到用户 OSS（私有）→ 预签名 URL → 提交任务 → 轮询 → 取结果。支持超大/超长音频。
-> - 应用层按音频大小路由：≤7MB（原始）走同步，否则走大文件。OSS 凭证经 `AsrConfig` 的 oss_* 字段提供（§2.5 扩展）。
+> - **M11（2026-06-14）改为用户显式选择**：实时/离线各自在设置中选后端（`streaming_backend` / `offline_backend`，§2.7），
+>   不再按音频大小自动在 offline/filetrans 间路由。选「大文件」后端时在其配置项下填 OSS 参数；同步后端超限则由后端返回
+>   `UnsupportedFormat` 提示改用大文件。OSS 凭证经该后端的配置（或环境变量回退）提供。
 
 ### 2.7 持久化配置 Schema 契约
 
@@ -350,13 +353,30 @@ start_minimized = true
 window_on_top = false
 audio_feedback = true
 
+# 2026-06-14 重构：实时/离线各自独立选择后端，且每个后端有独立配置。
 [asr]
-backend_id = "aliyun_bailian_streaming"
 default_mode = "streaming"   # "streaming" | "offline"，对应 TranscriptionMode
-api_endpoint = "https://dashscope.aliyuncs.com/api/v1/..."
-api_key = "<encrypted>"      # 加密存储，见 §8.3
 language = "zh"              # "zh" | "en" | "auto"
 max_recording_seconds = 600
+streaming_backend = "aliyun_bailian_streaming"  # 实时模式选用的后端（须支持流式）
+offline_backend = "aliyun_bailian_offline"      # 离线模式选用的后端（须支持离线）
+
+# 每个后端的独立配置（按后端 id 索引）。endpoint 留空则用后端内置默认。
+[asr.backends.aliyun_bailian_streaming]
+api_key = "<encrypted>"      # 加密存储，见 §8.3；留空则回退环境变量 DASHSCOPE_API_KEY
+endpoint = ""
+
+[asr.backends.aliyun_bailian_offline]
+api_key = "<encrypted>"
+endpoint = ""
+
+[asr.backends.aliyun_bailian_filetrans]   # 大文件后端额外需 OSS 中转参数
+api_key = "<encrypted>"
+endpoint = ""
+oss_endpoint = ""
+oss_bucket = ""
+oss_access_key_id = ""
+oss_access_key_secret = "<encrypted>"     # 加密存储
 
 [shortcuts]
 toggle_recording = "Ctrl+Alt+Space"
@@ -371,7 +391,7 @@ history_retention_days = 30
 [window]
 x = 0                        # 上次窗口位置/尺寸；未设置时由应用决定默认
 y = 0
-width = 480
+width = 760
 height = 600
 ```
 
@@ -1191,18 +1211,33 @@ ffprobe <生成的 wav 文件>
 
 #### 🤖 Agent 任务清单
 
-**任务 11.1: 完整设置面板 UI（`src/settings/panel.rs`）**
+**任务 11.1: 完整设置面板 UI（`src/settings.rs`）**
 - 按 [§6.4 设置面板结构](#64-设置面板结构) 实现。
 
 **任务 11.2: 主题系统（`src/theme.rs`）**
 - 定义主题色集合（背景/前景/强调/各状态色）；light/dark 预设；可跟随系统。
 - 🧩 主题共享与系统主题探测的具体实现以当前 GPUI / 平台 API 为准。
 
-**任务 11.3: i18n 基础（`src/i18n/`）**
+**任务 11.3: i18n 基础（`src/i18n.rs` + `locales/`）**
 - 用 `rust-i18n` 定义中/英翻译键；设置中切换语言后 UI 即时更新。
 
 **任务 11.4: 关于面板**
 - 版本号、构建时间、Git commit hash（`env!` 宏注入）；协议链接；"导出诊断信息"按钮。
+
+> 📝 **M11 落地说明（2026-06-14）**：
+> - **设置面板形态**：实现为**全屏覆盖层**（`SettingsView` 子视图，主视图 `show_settings` 控制显隐），
+>   而非模态 Dialog/Sheet——避免父子视图互租借的双重租借坑；自身只读写 `GlobalConfig` 与全局 locale/theme，
+>   关闭经 `SettingsEvent::Closed` 事件通知主视图收起。入口为左栏 ⚙ 按钮。
+> - **主题（11.2）**：直接复用 gpui-component 的主题系统（`Theme::change` / `Theme::sync_system_appearance`），
+>   不自定义色板。`src/theme.rs` 仅把配置值 light/dark/system 映射并应用；启动时套用、设置内即时切换。
+> - **i18n（11.3）**：`rust-i18n` + crate 根 `locales/app.yaml`（zh-CN/en）。locale 为全局状态，与 gpui-component
+>   内置文案共享，切换语言 `set_locale` + `window.refresh()` 即时重渲染。已覆盖主界面与设置面板可见文案；
+>   极少数在创建时一次性设定的占位符（编辑器/搜索框）与部分 Toast 暂未随切换刷新（次要）。`src/i18n/` 目录改为单文件 `src/i18n.rs` + `locales/`。
+> - **构建信息（11.4）**：`build.rs` 注入 `VOXINK_GIT_HASH` / `VOXINK_BUILD_TIME`（`env!` 读取）；
+>   `src/diagnostics.rs` 生成脱敏诊断（不含密钥，仅标注是否已配置）写入 `{配置目录}/voxink_diagnostics.txt`。
+> - **连接测试**：M7 临时放主界面的"测试连接"已移入设置面板 ASR 区。
+> - **暂未联动项**：`window_on_top`（窗口置顶）与 `audio_feedback`（提示音）当前仅持久化配置、无即时效果
+>   （置顶需平台 API、提示音功能尚未实现），留待后续。
 
 #### 验收标准
 - [ ] 设置面板各项配置功能完整可用
@@ -1416,11 +1451,8 @@ VoxInk/
 │   ├── state.rs                # 📐 RecordingState, TranscriptionMode, AppState（§2.1）
 │   ├── config.rs               # VoxInkConfig 定义 + 读写 + 加密（§2.7, §8）
 │   ├── error.rs                # AppError 统一错误类型
-│   ├── theme.rs                # 主题系统
-│   ├── i18n/                   # 多语言翻译
-│   │   ├── mod.rs
-│   │   ├── zh_CN.rs
-│   │   └── en_US.rs
+│   ├── theme.rs                # 主题系统 (M11)：配置值→gpui-component 主题
+│   ├── i18n.rs                 # 多语言辅助 (M11)；词典见 crate 根 locales/app.yaml
 │   ├── audio/                  # 音频子系统
 │   │   ├── mod.rs
 │   │   ├── capture.rs          # cpal 音频采集
@@ -1452,10 +1484,8 @@ VoxInk/
 │   │   ├── mod.rs              # GlobalHistory + 模块导出
 │   │   └── db.rs               # 📐 SQLite 单表 records + FTS5（§2.8）
 │   │                          # 注：左栏 UI 直接在 app.rs 渲染；无独立 panel.rs / session.rs（2026-06-14 重设计）
-│   ├── settings/               # 设置面板 (M11)
-│   │   ├── mod.rs
-│   │   └── panel.rs
-│   └── diagnostics.rs          # 诊断信息导出 (M11)
+│   ├── settings.rs             # 设置面板 SettingsView 全屏覆盖层 (M11)
+│   └── diagnostics.rs          # 诊断信息导出 + 构建信息常量 (M11)
 └── tests/
     ├── integration/
     │   ├── audio_tests.rs

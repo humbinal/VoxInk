@@ -21,7 +21,7 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "macros"] }
 
 # ASR 网络层（§1.4，M4）。rustls-tls：纯 Rust TLS，跨平台无需 OpenSSL/C 工具链。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 async-trait = "0.1"
 serde_json = "1"
 

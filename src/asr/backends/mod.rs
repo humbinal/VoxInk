@@ -5,4 +5,4 @@
 pub mod bailian_filetrans;
 pub mod bailian_offline;
 pub mod bailian_streaming;
-pub mod generic_ws;
+pub mod qwen3_asr_selfhosted;

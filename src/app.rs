@@ -1211,9 +1211,19 @@ async fn run_offline_transcription(
     backend.transcribe_offline(&config, audio).await
 }
 
+/// 某后端在 api_key 留空时回退的环境变量名（"后端 → 环境变量" 的**单一映射**，
+/// 由 [`runtime_asr_config`] 与设置面板提示共用）。新增后端时在此登记其专属变量。
+pub(crate) fn api_key_env_var(backend_id: &str) -> &'static str {
+    match backend_id {
+        "qwen3_asr_selfhosted" => "QWEN3_ASR_API_KEY",
+        // 阿里云百炼系（streaming/offline/filetrans）共用 DashScope Key。
+        _ => "DASHSCOPE_API_KEY",
+    }
+}
+
 /// 从持久化配置构造运行期 `AsrConfig`（供主视图与设置面板共用）。
 /// 按 `want_streaming` 选用对应模式的后端（streaming_backend / offline_backend），并取该后端的独立配置；
-/// 后端 api_key/OSS 为空时回退到环境变量（`DASHSCOPE_API_KEY` / `OSS_*`）。api_key 为内存明文（§5.3 不记录值）。
+/// 后端 api_key/OSS 为空时回退到环境变量（自建服务 `QWEN3_ASR_API_KEY`，百炼系 `DASHSCOPE_API_KEY`；OSS 用 `OSS_*`）。api_key 为内存明文（§5.3 不记录值）。
 pub(crate) fn runtime_asr_config(cx: &App, want_streaming: bool) -> AsrConfig {
     let Some(global) = cx.try_global::<GlobalConfig>() else {
         return AsrConfig::default();
@@ -1224,6 +1234,19 @@ pub(crate) fn runtime_asr_config(cx: &App, want_streaming: bool) -> AsrConfig {
     } else {
         asr.offline_backend.clone()
     };
+    // 迁移兜底：配置里的后端 id 若已不在注册表（如旧版 generic_ws），回退到默认后端，
+    // 避免运行期 "未找到后端" 错误。
+    let backend_id = if BackendRegistry::with_builtins().get(&backend_id).is_some() {
+        backend_id
+    } else {
+        let fallback = if want_streaming {
+            "aliyun_bailian_streaming"
+        } else {
+            "aliyun_bailian_offline"
+        };
+        tracing::warn!(%backend_id, fallback, "配置的 ASR 后端不存在，回退到默认后端");
+        fallback.to_string()
+    };
     let bs = asr.backend(&backend_id);
     let or_env = |v: &str, env_key: &str| {
         if v.trim().is_empty() {
@@ -1233,8 +1256,8 @@ pub(crate) fn runtime_asr_config(cx: &App, want_streaming: bool) -> AsrConfig {
         }
     };
     AsrConfig {
+        api_key: or_env(&bs.api_key, api_key_env_var(&backend_id)),
         backend_id,
-        api_key: or_env(&bs.api_key, "DASHSCOPE_API_KEY"),
         api_endpoint: bs.endpoint.clone(),
         language: asr.language.clone(),
         oss_endpoint: or_env(&bs.oss_endpoint, "OSS_ENDPOINT"),

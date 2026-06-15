@@ -74,7 +74,8 @@ pub struct AsrSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackendSettings {
-    /// API Key（云服务）。留空则运行期回退到环境变量 `DASHSCOPE_API_KEY`（阿里云后端）。
+    /// API Key（云服务/自建服务，可选）。留空则运行期回退到环境变量：
+    /// 阿里云后端用 `DASHSCOPE_API_KEY`，Qwen3-ASR 自建服务用 `QWEN3_ASR_API_KEY`。
     pub api_key: String,
     /// 接入地址；留空则用后端内置默认值。
     pub endpoint: String,

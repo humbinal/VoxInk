@@ -23,7 +23,7 @@
 - 🎙️ **灵活的语音转录模式**：
   - **实时转录**：开启实时流式 ASR，边说边录，文本即时呈现在输入框中，适合发散性思维的即兴表达。
   - **离线转录**：仅在后台进行本地录音，待录音结束后一次性上传并完成整段高精度音频转录，适合更有条理的段落输入。
-- 🔌 **可插拔的 ASR 后端**：转录"模式"（实时/离线）与识别"后端"是两个正交维度。后端通过统一的 trait 抽象实现可插拔，内置阿里云百炼（实时/离线/大文件）、通用 WebSocket，可在设置中自由切换。
+- 🔌 **可插拔的 ASR 后端**：转录"模式"（实时/离线）与识别"后端"是两个正交维度。后端通过统一的 trait 抽象实现可插拔，内置阿里云百炼（实时/离线/大文件）、Qwen3-ASR 自建服务（实时+离线大文件一体，私有化部署），可在设置中自由切换。
 - 📝 **即时编辑与一键复制**：转录后的文本会被渲染在主界面的精简文本框中，支持任意的手动修改与校对，并提供一键复制功能，确保最终输入给大模型的提示词准确无误。
 - 🔒 **隐私优先**：API Key 以 AES-256-GCM 本地加密存储（纯 Rust 实现，机器绑定）；大文件转写经用户自有 OSS 私有中转、可配置生命周期清理。
 - ⚡ **轻量高效的运行体验**：采用 GPU 加速的 **GPUI** 框架构建，界面渲染顺滑，资源占用极小。
@@ -37,7 +37,7 @@
   cross-platform desktop application by using GPUI.
 - **异步运行时**：[tokio](https://tokio.rs) —— 调度网络与耗时任务。
 - **音频管线**：[cpal](https://github.com/RustAudio/cpal)（采集）+ [rubato](https://github.com/HEnquist/rubato)（重采样）+ [hound](https://github.com/ruuda/hound)（WAV 读写）+ [ringbuf](https://github.com/agerasev/ringbuf)（无锁环形缓冲）。
-- **语音识别 (ASR)**：基于 trait 抽象的可插拔云端后端 —— 阿里云百炼（Qwen-ASR 实时 / 同步离线 / 大文件异步）、通用 WebSocket（自建服务）。
+- **语音识别 (ASR)**：基于 trait 抽象的可插拔后端 —— 阿里云百炼（Qwen-ASR 实时 / 同步离线 / 大文件异步）、Qwen3-ASR 自建服务（[Quantatirsk/qwen3-asr](https://github.com/Quantatirsk/qwen3-asr) 私有化部署，单服务同时支持实时与离线大文件）。
 - **系统集成**：[tray-icon](https://github.com/tauri-apps/tray-icon)（托盘）、[global-hotkey](https://github.com/tauri-apps/global-hotkey)（全局快捷键）、[arboard](https://github.com/1Password/arboard)（剪贴板）、[auto-launch](https://github.com/zzzgydi/auto-launch)（开机自启）。
 - **存储与安全**：[toml](https://github.com/toml-rs/toml) 配置持久化、[aes-gcm](https://github.com/RustCrypto/AEADs) + [hkdf](https://github.com/RustCrypto/KDFs) 加密、[rusqlite](https://github.com/rusqlite/rusqlite)（FTS5 全文检索历史）。
 

@@ -24,9 +24,11 @@ pub fn build_time_display() -> String {
 
 /// 生成诊断文本（**不含任何密钥**，仅标注是否已配置）。
 pub fn report(config: &VoxInkConfig) -> String {
-    let env_key = std::env::var("DASHSCOPE_API_KEY")
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
+    let env_key = ["DASHSCOPE_API_KEY", "QWEN3_ASR_API_KEY"].iter().any(|k| {
+        std::env::var(k)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    });
     let any_backend_key = config
         .asr
         .backends

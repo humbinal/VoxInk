@@ -17,10 +17,10 @@ use super::error::AsrError;
 #[async_trait]
 pub trait AsrBackend: Send + Sync + 'static {
     /// 后端唯一标识符，对应 `AsrConfig.backend_id`。
-    /// 示例: "aliyun_bailian_streaming", "generic_ws"
+    /// 示例: "aliyun_bailian_streaming", "qwen3_asr_selfhosted"
     fn backend_id(&self) -> &str;
 
-    /// 用户可见的后端名称。示例: "阿里云百炼（实时）", "通用 WebSocket"
+    /// 用户可见的后端名称。示例: "阿里云百炼（实时）", "Qwen3-ASR 自建服务"
     fn display_name(&self) -> &str;
 
     /// 本后端是否支持实时流式识别。

@@ -30,6 +30,32 @@ pub async fn connect(url: &str, api_key: &str) -> Result<WsStream, AsrError> {
         HeaderValue::from_static("enable"),
     );
 
+    handshake(request).await
+}
+
+/// 非 DashScope 的 WebSocket 连接（自建服务用）。仅当 `api_key` 非空时附加
+/// `Authorization: Bearer <key>`；不发送任何 DashScope 专属头（区别于 [`connect`]）。
+pub async fn connect_plain(url: &str, api_key: &str) -> Result<WsStream, AsrError> {
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| AsrError::WebSocketError(format!("构造 WS 请求失败: {e}")))?;
+
+    if !api_key.is_empty() {
+        let bearer = format!("Bearer {api_key}");
+        request.headers_mut().insert(
+            "Authorization",
+            HeaderValue::from_str(&bearer)
+                .map_err(|e| AsrError::WebSocketError(format!("无效鉴权头: {e}")))?,
+        );
+    }
+
+    handshake(request).await
+}
+
+/// 执行握手，把 401/403 映射为 [`AsrError::AuthError`]（不重试）。
+async fn handshake(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+) -> Result<WsStream, AsrError> {
     let (stream, _resp) = match connect_async(request).await {
         Ok(ok) => ok,
         // 握手返回 401/403 → 鉴权失败（API Key 无效），映射为 AuthError 不重试。

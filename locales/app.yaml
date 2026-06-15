@@ -85,6 +85,9 @@ settings.streaming_backend:
 settings.offline_backend:
   zh-CN: 离线识别后端
   en: Offline backend
+settings.shared_config_hint:
+  zh-CN: 与实时选用同一后端，共用同一份配置（在上方「实时」区填写基址与 Key）
+  en: Same backend as realtime; shares one config (set base URL & key in the Realtime section above)
 settings.oss_endpoint:
   zh-CN: OSS Endpoint
   en: OSS Endpoint
@@ -104,8 +107,11 @@ settings.api_key:
   zh-CN: API Key
   en: API Key
 settings.api_key_ph:
-  zh-CN: 留空则用环境变量 DASHSCOPE_API_KEY
-  en: Empty = use env DASHSCOPE_API_KEY
+  zh-CN: 可选，留空则回退环境变量
+  en: Optional; empty uses env var
+settings.api_key_env_hint:
+  zh-CN: 留空则使用环境变量
+  en: Empty falls back to env var
 settings.endpoint:
   zh-CN: 接入地址 (Endpoint)
   en: Endpoint

@@ -138,16 +138,20 @@ impl SettingsView {
             s.api_key = s_key.trim().to_string();
             s.endpoint = s_ep.trim().to_string();
 
-            let oid = c.asr.offline_backend.clone();
-            let is_filetrans = oid == FILETRANS_ID;
-            let o = c.asr.backends.entry(oid).or_default();
-            o.api_key = o_key.trim().to_string();
-            o.endpoint = o_ep.trim().to_string();
-            if is_filetrans {
-                o.oss_endpoint = oss_e.trim().to_string();
-                o.oss_bucket = oss_b.trim().to_string();
-                o.oss_access_key_id = oss_id.trim().to_string();
-                o.oss_access_key_secret = oss_secret.trim().to_string();
+            // 离线与实时选同一后端时，二者共用同一份配置（离线输入未渲染）；
+            // 跳过离线写入，否则离线区的旧值会覆盖实时区刚填的值。
+            if c.asr.offline_backend != c.asr.streaming_backend {
+                let oid = c.asr.offline_backend.clone();
+                let is_filetrans = oid == FILETRANS_ID;
+                let o = c.asr.backends.entry(oid).or_default();
+                o.api_key = o_key.trim().to_string();
+                o.endpoint = o_ep.trim().to_string();
+                if is_filetrans {
+                    o.oss_endpoint = oss_e.trim().to_string();
+                    o.oss_bucket = oss_b.trim().to_string();
+                    o.oss_access_key_id = oss_id.trim().to_string();
+                    o.oss_access_key_secret = oss_secret.trim().to_string();
+                }
             }
 
             if let Ok(n) = max.trim().parse::<u32>()
@@ -275,6 +279,19 @@ impl SettingsView {
             .child(tr(key))
     }
 
+    /// api_key 输入框下方的动态提示：随所选后端显示其专属回退环境变量名。
+    fn api_key_env_hint(&self, backend_id: &str, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .pt_0p5()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!(
+                "{} {}",
+                tr("settings.api_key_env_hint"),
+                crate::app::api_key_env_var(backend_id)
+            ))
+    }
+
     fn labeled(&self, label_key: &str, control: impl IntoElement) -> impl IntoElement {
         h_flex()
             .w_full()
@@ -379,6 +396,8 @@ impl Render for SettingsView {
         let streaming_opts: Vec<_> = all.iter().filter(|b| b.supports_streaming).cloned().collect();
         let offline_opts: Vec<_> = all.iter().filter(|b| b.supports_offline).cloned().collect();
         let off_is_filetrans = cfg.asr.offline_backend == FILETRANS_ID;
+        // 离线与实时选同一后端（如 Qwen3-ASR 自建服务）时，共用一份配置：离线区不再重复渲染输入框。
+        let off_shared = cfg.asr.offline_backend == cfg.asr.streaming_backend;
 
         let body = v_flex()
             .id("settings-body")
@@ -399,6 +418,7 @@ impl Render for SettingsView {
             ))
             .child(self.field_label("settings.api_key", cx))
             .child(Input::new(&self.stream_api_key))
+            .child(self.api_key_env_hint(&cfg.asr.streaming_backend, cx))
             .child(self.field_label("settings.endpoint", cx))
             .child(Input::new(&self.stream_endpoint))
             .child(
@@ -417,27 +437,40 @@ impl Render for SettingsView {
                 offline_opts,
                 cx,
             ))
-            .child(self.field_label("settings.api_key", cx))
-            .child(Input::new(&self.off_api_key))
-            .child(self.field_label("settings.endpoint", cx))
-            .child(Input::new(&self.off_endpoint))
-            // 大文件后端额外的 OSS 参数
-            .when(off_is_filetrans, |this| {
+            // 与实时共用同一后端时，仅给出提示，不重复渲染输入框（避免双份编辑互相覆盖）。
+            .when(off_shared, |this| {
                 this.child(
                     div()
                         .pt_1()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(tr("settings.oss_hint")),
+                        .child(tr("settings.shared_config_hint")),
                 )
-                .child(self.field_label("settings.oss_endpoint", cx))
-                .child(Input::new(&self.off_oss_endpoint))
-                .child(self.field_label("settings.oss_bucket", cx))
-                .child(Input::new(&self.off_oss_bucket))
-                .child(self.field_label("settings.oss_ak_id", cx))
-                .child(Input::new(&self.off_oss_ak_id))
-                .child(self.field_label("settings.oss_ak_secret", cx))
-                .child(Input::new(&self.off_oss_ak_secret))
+            })
+            .when(!off_shared, |this| {
+                this.child(self.field_label("settings.api_key", cx))
+                    .child(Input::new(&self.off_api_key))
+                    .child(self.api_key_env_hint(&cfg.asr.offline_backend, cx))
+                    .child(self.field_label("settings.endpoint", cx))
+                    .child(Input::new(&self.off_endpoint))
+                    // 大文件后端额外的 OSS 参数
+                    .when(off_is_filetrans, |this| {
+                        this.child(
+                            div()
+                                .pt_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr("settings.oss_hint")),
+                        )
+                        .child(self.field_label("settings.oss_endpoint", cx))
+                        .child(Input::new(&self.off_oss_endpoint))
+                        .child(self.field_label("settings.oss_bucket", cx))
+                        .child(Input::new(&self.off_oss_bucket))
+                        .child(self.field_label("settings.oss_ak_id", cx))
+                        .child(Input::new(&self.off_oss_ak_id))
+                        .child(self.field_label("settings.oss_ak_secret", cx))
+                        .child(Input::new(&self.off_oss_ak_secret))
+                    })
             })
             .child(
                 div().pt_2().child(

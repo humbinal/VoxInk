@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::backends::bailian_filetrans::BailianFiletransBackend;
 use super::backends::bailian_offline::BailianOfflineBackend;
 use super::backends::bailian_streaming::BailianStreamingBackend;
-use super::backends::generic_ws::GenericWsBackend;
+use super::backends::qwen3_asr_selfhosted::Qwen3AsrSelfhostedBackend;
 use super::traits::AsrBackend;
 
 type BackendFactory = Box<dyn Fn() -> Arc<dyn AsrBackend> + Send + Sync>;
@@ -48,7 +48,9 @@ impl BackendRegistry {
         registry.register("aliyun_bailian_streaming", || {
             Arc::new(BailianStreamingBackend::new())
         });
-        registry.register("generic_ws", || Arc::new(GenericWsBackend::new()));
+        registry.register("qwen3_asr_selfhosted", || {
+            Arc::new(Qwen3AsrSelfhostedBackend::new())
+        });
         registry
     }
 

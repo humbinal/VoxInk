@@ -897,6 +897,28 @@ impl VoxInk {
         }
     }
 
+    /// 在系统文件管理器中打开当前记录的录音目录（取最近一段已存在音频的所在目录）。
+    fn on_open_recordings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_record_id.is_empty() {
+            window.push_notification("该记录暂无录音文件", cx);
+            return;
+        }
+        let paths = cx
+            .try_global::<GlobalHistory>()
+            .and_then(|g| g.0.audio_paths_for_record(&self.current_record_id).ok())
+            .unwrap_or_default();
+        // 取最近一段仍存在的音频文件，打开其所在目录。
+        let dir = paths
+            .iter()
+            .rev()
+            .find(|p| p.exists())
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        match dir {
+            Some(dir) => cx.open_with_system(&dir),
+            None => window.push_notification("该记录暂无录音文件", cx),
+        }
+    }
+
     /// 打开设置面板覆盖层（M11）：用当前配置填充输入框后显示。
     fn on_open_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.settings
@@ -1281,7 +1303,20 @@ impl VoxInk {
             .py_3()
             .text_sm()
             .text_color(cx.theme().muted_foreground)
-            .child(format!("{} {char_count}", tr("footer.words")))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("open-recordings")
+                            .ghost()
+                            .small()
+                            .icon(IconName::FolderOpen)
+                            .tooltip(tr("footer.open_recordings"))
+                            .on_click(cx.listener(Self::on_open_recordings)),
+                    )
+                    .child(format!("{} {char_count}", tr("footer.words"))),
+            )
             .child(
                 Button::new("copy")
                     .primary()

@@ -450,7 +450,8 @@ CREATE INDEX IF NOT EXISTS idx_segments_record ON segments(record_id, created_at
 > 用户可在设置中改根目录（仅影响新录音；旧片段记绝对路径、留原处）。生命周期：录音完成落
 > `segments` 行（转写成败都保留音频，失败时 `text` 为空，可重转写）；删记录级联删行+应用层删文件；
 > 启动时清理过期片段（`audio_retention_days`）、孤儿文件、旧版临时 WAV。`save_audio=false` 时
-> 沿用临时文件并在转写后删除、不入库。
+> 沿用临时文件并在转写后删除、不入库。主界面底栏提供「打开录音目录」按钮，在系统文件管理器中
+> 打开当前记录最近一段音频所在目录。
 
 ---
 

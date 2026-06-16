@@ -59,6 +59,9 @@ editor.placeholder:
 footer.words:
   zh-CN: 字数
   en: Words
+footer.open_recordings:
+  zh-CN: 打开录音目录
+  en: Open recordings folder
 footer.copy:
   zh-CN: 一键复制
   en: Copy all

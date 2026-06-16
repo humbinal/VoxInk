@@ -1483,13 +1483,10 @@ impl VoxInk {
         }
 
         for &l in &self.levels {
-            // 峰值 0..1 加增益后映射到 3..30px；轻微非线性让小音量也可见。
-            let norm = (l * 3.2).min(1.0).powf(0.7);
-            let h = 3.0 + norm * 27.0;
             row = row.child(
                 div()
                     .w(px(2.))
-                    .h(px(h))
+                    .h(px(level_bar_height(l)))
                     .rounded_full()
                     .bg(STATUS_RECORDING),
             );
@@ -1935,6 +1932,21 @@ impl RecordGlyph {
             RecordGlyph::None => None,
         }
     }
+}
+
+/// 电平（0..1 峰值幅度）→ 波形竖条高度（px）。
+///
+/// 用 **dBFS 对数映射**（-50dB..0dB → 3..30px）而非线性增益：人耳对响度本就近似对数，
+/// 且只有逼近 0dBFS（数字削顶）才撑满，普通/偏大的说话声（约 -12..-3dB）落在中上段、保留动态余量，
+/// 不会"稍大一点就满格"。
+fn level_bar_height(level: f32) -> f32 {
+    const MIN_DB: f32 = -50.0;
+    let norm = if level <= 1e-5 {
+        0.0
+    } else {
+        ((20.0 * level.log10() - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
+    };
+    3.0 + norm * 27.0
 }
 
 /// 秒数格式化为 `MM:SS`。

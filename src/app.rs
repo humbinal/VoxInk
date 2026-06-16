@@ -784,37 +784,6 @@ impl VoxInk {
         cx.notify();
     }
 
-    /// 导出全部记录为 JSON（写入配置目录，Toast 路径；任务 10.4）。
-    fn on_export(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let result = (|| -> anyhow::Result<PathBuf> {
-            let global = cx
-                .try_global::<GlobalHistory>()
-                .ok_or_else(|| anyhow::anyhow!("历史数据库不可用"))?;
-            let json = global.0.export_json()?;
-            let dir = crate::history::db::HistoryDb::default_path()?
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_default();
-            let path = dir.join(format!(
-                "history_export_{}.json",
-                Local::now().format("%Y%m%d_%H%M%S")
-            ));
-            std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
-            Ok(path)
-        })();
-
-        match result {
-            Ok(path) => {
-                tracing::info!("历史已导出: {}", path.display());
-                window.push_notification(format!("已导出到 {}", path.display()), cx);
-            }
-            Err(e) => {
-                tracing::error!("导出历史失败: {e:#}");
-                window.push_notification("导出失败", cx);
-            }
-        }
-    }
-
     // ───────────────────────────── 渲染：左栏 ─────────────────────────────
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -861,22 +830,11 @@ impl VoxInk {
                             ),
                     )
                     .child(
-                        h_flex()
-                            .gap_0p5()
-                            .child(
-                                Button::new("export")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::ArrowDown)
-                                    .on_click(cx.listener(Self::on_export)),
-                            )
-                            .child(
-                                Button::new("settings")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Settings)
-                                    .on_click(cx.listener(Self::on_open_settings)),
-                            ),
+                        Button::new("settings")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Settings)
+                            .on_click(cx.listener(Self::on_open_settings)),
                     ),
             )
             .child(div().px_3().pb_2().child(self.render_new_button(cx)))
@@ -1263,6 +1221,25 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     let mut clipboard = arboard::Clipboard::new().context("打开系统剪贴板失败")?;
     clipboard.set_text(text.to_owned()).context("写入剪贴板失败")?;
     Ok(())
+}
+
+/// 导出全部历史记录为 JSON，写入配置目录，返回文件路径（任务 10.4）。
+/// 由设置面板「数据」区调用（2026-06-16 从主界面标题栏迁入）。
+pub(crate) fn export_history_json(cx: &App) -> Result<PathBuf> {
+    let global = cx
+        .try_global::<GlobalHistory>()
+        .ok_or_else(|| anyhow::anyhow!("历史数据库不可用"))?;
+    let json = global.0.export_json()?;
+    let dir = crate::history::db::HistoryDb::default_path()?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let path = dir.join(format!(
+        "history_export_{}.json",
+        Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+    Ok(path)
 }
 
 /// 读取 WAV → 用配置选定的离线后端转写（在 Tokio 运行时执行）。

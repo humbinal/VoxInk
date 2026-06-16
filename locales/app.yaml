@@ -175,6 +175,15 @@ shortcut.copy_paste:
 settings.shortcuts_hint:
   zh-CN: （编辑 config.toml 的 [shortcuts] 后重启生效）
   en: (Edit [shortcuts] in config.toml, restart to apply)
+settings.section.data:
+  zh-CN: 数据
+  en: Data
+settings.export_history:
+  zh-CN: 导出全部历史
+  en: Export all history
+settings.export_history_hint:
+  zh-CN: 导出为 JSON，保存到配置目录
+  en: Exports all records as JSON to the config folder
 settings.section.about:
   zh-CN: 关于
   en: About

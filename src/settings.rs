@@ -218,6 +218,20 @@ impl SettingsView {
         .detach();
     }
 
+    /// 导出全部历史记录为 JSON（2026-06-16 从主界面标题栏迁入「数据」区）。
+    fn on_export_history(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match crate::app::export_history_json(cx) {
+            Ok(path) => {
+                tracing::info!("历史已导出: {}", path.display());
+                window.push_notification(format!("已导出到 {}", path.display()), cx);
+            }
+            Err(e) => {
+                tracing::error!("导出历史失败: {e:#}");
+                window.push_notification("导出失败", cx);
+            }
+        }
+    }
+
     fn on_export_diag(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let config = cx.try_global::<GlobalConfig>().map(|g| g.0.clone());
         let Some(config) = config else { return };
@@ -555,6 +569,23 @@ impl Render for SettingsView {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(tr("settings.shortcuts_hint")),
+            )
+            // ── 数据 ──
+            .child(self.section_title("settings.section.data", cx))
+            .child(
+                div().pt_2().child(
+                    Button::new("export-history")
+                        .outline()
+                        .label(tr("settings.export_history"))
+                        .on_click(cx.listener(Self::on_export_history)),
+                ),
+            )
+            .child(
+                div()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr("settings.export_history_hint")),
             )
             // ── 关于 ──
             .child(self.section_title("settings.section.about", cx))

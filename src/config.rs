@@ -30,6 +30,7 @@ pub struct VoxInkConfig {
     pub asr: AsrSettings,
     pub shortcuts: ShortcutsConfig,
     pub text: TextConfig,
+    pub storage: StorageConfig,
     pub window: WindowConfig,
 }
 
@@ -109,6 +110,37 @@ pub struct TextConfig {
     pub history_retention_days: u32,
 }
 
+/// 录音音频文件的存储设置（§2.7 的 `[storage]` 段，2026-06-16）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageConfig {
+    /// 是否持久化录音音频；false 则沿用临时文件、转写后删除（不入库）。
+    pub save_audio: bool,
+    /// 音频根目录；留空则用默认（`{LOCALAPPDATA}/VoxInk/recordings`，见 [`StorageConfig::audio_root`]）。
+    /// 更改仅对**新**录音生效，已有片段在 DB 中记绝对路径、留在原处（§4.2.2）。
+    pub audio_dir: String,
+    /// 音频保留天数；0 表示永久保留。与文本保留（`text.history_retention_days`）独立。
+    pub audio_retention_days: u32,
+}
+
+impl StorageConfig {
+    /// 默认音频根目录：`{平台本地数据目录}/VoxInk/recordings`。
+    /// 大体积媒体放本地数据目录（Windows 为 `%LOCALAPPDATA%`），不放可漫游的配置目录。
+    pub fn default_audio_root() -> Result<PathBuf> {
+        let base = BaseDirs::new().context("无法定位用户数据目录")?;
+        Ok(base.data_local_dir().join("VoxInk").join("recordings"))
+    }
+
+    /// 当前生效的音频根目录：配置非空则用之，否则用默认。
+    pub fn audio_root(&self) -> Result<PathBuf> {
+        if self.audio_dir.trim().is_empty() {
+            Self::default_audio_root()
+        } else {
+            Ok(PathBuf::from(self.audio_dir.trim()))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
@@ -128,7 +160,18 @@ impl Default for VoxInkConfig {
             asr: AsrSettings::default(),
             shortcuts: ShortcutsConfig::default(),
             text: TextConfig::default(),
+            storage: StorageConfig::default(),
             window: WindowConfig::default(),
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            save_audio: true,
+            audio_dir: String::new(),
+            audio_retention_days: 90,
         }
     }
 }
@@ -174,7 +217,8 @@ impl Default for TextConfig {
         Self {
             auto_copy: false,
             append_mode: true,
-            history_retention_days: 30,
+            // 文本记录默认保留 1 年（音频另由 storage.audio_retention_days 控制，默认 90 天）。
+            history_retention_days: 365,
         }
     }
 }

@@ -97,6 +97,8 @@ fn main() -> Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!("清理过期历史失败: {e:#}"),
                 }
+                // 音频维护：过期片段清理 + 孤儿/旧临时文件清理（2026-06-16）。
+                app::cleanup_audio_on_startup(&db, &config.storage);
                 cx.set_global(history::GlobalHistory(db));
             }
             Err(e) => tracing::error!("打开历史数据库失败（历史功能将不可用）: {e:#}"),

@@ -16,7 +16,7 @@ use tokio::sync::mpsc::Sender;
 use super::buffer::AudioCons;
 use super::capture::open_capture;
 use super::resample::MonoResampler;
-use super::writer::{create_writer, temp_wav_path, WavSink};
+use super::writer::{create_writer, WavSink};
 use super::{AudioError, RecordingOutcome};
 
 /// 16kHz 下 100ms = 1600 样本；i16 即 3200 字节。
@@ -32,10 +32,9 @@ pub struct StreamingCapture {
 }
 
 impl StreamingCapture {
-    /// 启动流式采集：PCM 100ms 帧经 `audio_tx` 发送，同时写本地 WAV（回退用）。
-    pub fn start(audio_tx: Sender<Vec<u8>>) -> Result<Self, AudioError> {
+    /// 启动流式采集：PCM 100ms 帧经 `audio_tx` 发送，同时写本地 WAV（`wav_path`，回退/留存用）。
+    pub fn start(audio_tx: Sender<Vec<u8>>, wav_path: PathBuf) -> Result<Self, AudioError> {
         let cap = open_capture()?;
-        let wav_path = temp_wav_path();
         let writer = create_writer(&wav_path)?;
         let resampler = MonoResampler::new(cap.input_rate)?;
         let stop_flag = Arc::new(AtomicBool::new(false));

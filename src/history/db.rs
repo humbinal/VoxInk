@@ -7,7 +7,7 @@
 //! 📝 FTS5 落地：外部内容 FTS5 需配套 INSERT/DELETE/UPDATE 触发器与 `records` 同步；并用
 //! `tokenize='trigram'`，否则默认 unicode61 对无空格中文几乎不分词、子串检索失效。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -36,6 +36,25 @@ pub struct Record {
     pub updated_at: String,
 }
 
+/// 一段录音片段（对应 §2.8 `segments` 表，2026-06-16）。
+/// 一条 [`Record`] 可挂多段（多次续录）；`file_path` 存**绝对路径**，
+/// 故更改音频根目录不影响已有片段（§4.2.2 决策）。
+#[derive(Debug, Clone, Serialize)]
+pub struct Segment {
+    pub id: String,
+    pub record_id: String,
+    /// 音频文件绝对路径。
+    pub file_path: String,
+    /// 录制模式 "streaming" | "offline"。
+    pub mode: String,
+    /// 该段产生的转写文本（用于音频↔文字对照、重转写）。
+    pub text: String,
+    pub duration_secs: u32,
+    pub byte_size: u64,
+    /// RFC3339 UTC。
+    pub created_at: String,
+}
+
 /// 历史数据库句柄。
 pub struct HistoryDb {
     conn: Connection,
@@ -62,6 +81,9 @@ impl HistoryDb {
 
     /// 从已有连接构造（供测试用内存库）。
     pub fn from_conn(conn: Connection) -> Result<Self> {
+        // 开启外键约束（rusqlite 连接默认关闭）：删 record 级联删其 segments 行。
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .context("启用外键约束失败")?;
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
@@ -95,6 +117,20 @@ impl HistoryDb {
                     INSERT INTO records_fts(records_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
                     INSERT INTO records_fts(rowid, text) VALUES (new.rowid, new.text);
                 END;
+
+                -- 录音片段：一条 record 可挂多段（多次续录）。删 record 级联删本表行（需外键开启）。
+                CREATE TABLE IF NOT EXISTS segments (
+                    id            TEXT PRIMARY KEY,
+                    record_id     TEXT NOT NULL,
+                    file_path     TEXT NOT NULL,
+                    mode          TEXT NOT NULL,
+                    text          TEXT NOT NULL DEFAULT '',
+                    duration_secs INTEGER NOT NULL DEFAULT 0,
+                    byte_size     INTEGER NOT NULL DEFAULT 0,
+                    created_at    TEXT NOT NULL,
+                    FOREIGN KEY(record_id) REFERENCES records(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_segments_record ON segments(record_id, created_at);
                 "#,
             )
             .context("初始化历史数据库表结构失败")?;
@@ -247,6 +283,103 @@ impl HistoryDb {
         Ok(n)
     }
 
+    // ───────────────────────────── 录音片段（segments，2026-06-16）─────────────────────────────
+
+    /// 新增一段录音片段，返回其记录。
+    pub fn add_segment(
+        &self,
+        record_id: &str,
+        file_path: &Path,
+        mode: &str,
+        text: &str,
+        duration_secs: u32,
+        byte_size: u64,
+    ) -> Result<Segment> {
+        let seg = Segment {
+            id: Uuid::new_v4().to_string(),
+            record_id: record_id.to_string(),
+            file_path: file_path.to_string_lossy().to_string(),
+            mode: mode.to_string(),
+            text: text.to_string(),
+            duration_secs,
+            byte_size,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.conn
+            .execute(
+                "INSERT INTO segments (id, record_id, file_path, mode, text, duration_secs, byte_size, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    seg.id,
+                    seg.record_id,
+                    seg.file_path,
+                    seg.mode,
+                    seg.text,
+                    seg.duration_secs,
+                    seg.byte_size as i64,
+                    seg.created_at,
+                ],
+            )
+            .context("新增录音片段失败")?;
+        Ok(seg)
+    }
+
+    /// 列出某记录的全部片段（按创建时间升序）。
+    pub fn list_segments(&self, record_id: &str) -> Result<Vec<Segment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, record_id, file_path, mode, text, duration_secs, byte_size, created_at
+             FROM segments WHERE record_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![record_id], map_segment)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("查询录音片段失败")?;
+        Ok(rows)
+    }
+
+    /// 某记录全部片段的音频文件路径（删除记录前取出，供应用层删文件）。
+    pub fn audio_paths_for_record(&self, record_id: &str) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .list_segments(record_id)?
+            .into_iter()
+            .map(|s| PathBuf::from(s.file_path))
+            .collect())
+    }
+
+    /// 全部片段的音频文件路径（用于启动时孤儿文件对账）。
+    pub fn all_segment_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut stmt = self.conn.prepare("SELECT file_path FROM segments")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("查询片段路径失败")?;
+        Ok(rows.into_iter().map(PathBuf::from).collect())
+    }
+
+    /// 删除 `created_at` 早于 `days` 天的片段行，返回被删片段的音频文件路径（供应用层删文件）。
+    /// `days == 0` 表示不清理。仅删音频（保留 record 文本）。
+    pub fn purge_audio_older_than(&self, days: u32) -> Result<Vec<PathBuf>> {
+        if days == 0 {
+            return Ok(Vec::new());
+        }
+        let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let paths: Vec<PathBuf> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT file_path FROM segments WHERE created_at < ?1")?;
+            stmt.query_map(params![cutoff], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("查询过期片段失败")?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        };
+        self.conn
+            .execute("DELETE FROM segments WHERE created_at < ?1", params![cutoff])
+            .context("清理过期片段失败")?;
+        Ok(paths)
+    }
+
     /// 导出全部记录为 JSON 值（任务 10.4）。
     pub fn export_json(&self) -> Result<serde_json::Value> {
         let records = self.list_records()?;
@@ -266,6 +399,24 @@ fn map_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
         duration_secs: row.get::<_, i64>(4)? as u32,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
+    })
+}
+
+/// 8 位短随机串（取 UUID v4 前 8 个十六进制位），用于录音文件名去重。
+pub fn short_uuid() -> String {
+    Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
+fn map_segment(row: &rusqlite::Row) -> rusqlite::Result<Segment> {
+    Ok(Segment {
+        id: row.get(0)?,
+        record_id: row.get(1)?,
+        file_path: row.get(2)?,
+        mode: row.get(3)?,
+        text: row.get(4)?,
+        duration_secs: row.get::<_, i64>(5)? as u32,
+        byte_size: row.get::<_, i64>(6)? as u64,
+        created_at: row.get(7)?,
     })
 }
 
@@ -372,6 +523,40 @@ mod tests {
         assert_eq!(db.search_records("天气").unwrap().len(), 1);
         // 空查询返回全部。
         assert_eq!(db.search_records("  ").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn segments_crud_and_cascade() {
+        let db = mem_db();
+        let r = db.create_record().unwrap();
+        let p1 = std::path::Path::new("/tmp/voxink/r1/a.wav");
+        let p2 = std::path::Path::new("/tmp/voxink/r1/b.wav");
+        db.add_segment(&r.id, p1, "offline", "第一段", 5, 100).unwrap();
+        db.add_segment(&r.id, p2, "streaming", "第二段", 7, 200).unwrap();
+
+        let segs = db.list_segments(&r.id).unwrap();
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].text, "第一段"); // created_at 升序
+        assert_eq!(segs[1].byte_size, 200);
+
+        let paths = db.audio_paths_for_record(&r.id).unwrap();
+        assert_eq!(paths.len(), 2);
+
+        // 删 record → 外键级联删 segments 行。
+        db.delete_record(&r.id).unwrap();
+        assert_eq!(db.list_segments(&r.id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn purge_audio_returns_paths() {
+        let db = mem_db();
+        let r = db.create_record().unwrap();
+        db.add_segment(&r.id, std::path::Path::new("/tmp/x.wav"), "offline", "", 1, 1)
+            .unwrap();
+        // days=0 不清理；刚建的片段在 30 天内也不过期。
+        assert_eq!(db.purge_audio_older_than(0).unwrap().len(), 0);
+        assert_eq!(db.purge_audio_older_than(30).unwrap().len(), 0);
+        assert_eq!(db.list_segments(&r.id).unwrap().len(), 1);
     }
 
     #[test]

@@ -386,7 +386,14 @@ copy_and_paste = "Ctrl+Alt+B"
 [text]
 auto_copy = false
 append_mode = true
-history_retention_days = 30
+history_retention_days = 365   # 文本记录保留天数（2026-06-16 默认 30→365）；0=永久
+
+# 录音音频存储（2026-06-16）。音频与文本保留策略独立。
+[storage]
+save_audio = true              # 是否持久化录音音频；false=用临时文件、转写后删、不入库
+audio_dir = ""                 # 音频根目录；留空=默认 {LOCALAPPDATA}/VoxInk/recordings
+                               # 更改仅对新录音生效；已有片段在 DB 记绝对路径、留原处（§4.2.2）
+audio_retention_days = 90      # 音频保留天数；0=永久；与 text.history_retention_days 独立
 
 [window]
 x = 0                        # 上次窗口位置/尺寸；未设置时由应用决定默认
@@ -419,7 +426,31 @@ CREATE TABLE IF NOT EXISTS records (
 -- 全文搜索索引（FTS5，trigram 分词以支持中文子串检索；见 M10 落地说明）
 CREATE VIRTUAL TABLE IF NOT EXISTS records_fts
     USING fts5(text, content=records, content_rowid=rowid, tokenize='trigram');
+
+-- 录音片段（2026-06-16）：一条 record 可挂多段（多次续录）。
+-- file_path 存绝对路径——更改音频根目录不影响已有片段（§4.2.2 决策：仅对新录音生效、旧文件留原处）。
+-- 删 record 经外键级联删本表行（连接需 PRAGMA foreign_keys = ON）。
+CREATE TABLE IF NOT EXISTS segments (
+    id            TEXT PRIMARY KEY,
+    record_id     TEXT NOT NULL,            -- FK → records.id
+    file_path     TEXT NOT NULL,            -- 音频文件绝对路径
+    mode          TEXT NOT NULL,            -- "streaming" | "offline"
+    text          TEXT NOT NULL DEFAULT '', -- 该段转写（音频↔文字对照/重转写）
+    duration_secs INTEGER NOT NULL DEFAULT 0,
+    byte_size     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,            -- RFC3339 UTC；音频保留策略按此清理
+    FOREIGN KEY(record_id) REFERENCES records(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_segments_record ON segments(record_id, created_at);
 ```
+
+> 📝 **音频文件管理（2026-06-16，经用户决策）**：录音不再只落临时目录，而是按记录归档。
+> 目录结构 `{音频根}/{record_id}/{YYYYMMDD-HHMMSS}_{短id}.wav`，默认音频根为
+> `{LOCALAPPDATA}/VoxInk/recordings`（大媒体放本地数据目录，不放可漫游的配置目录）。
+> 用户可在设置中改根目录（仅影响新录音；旧片段记绝对路径、留原处）。生命周期：录音完成落
+> `segments` 行（转写成败都保留音频，失败时 `text` 为空，可重转写）；删记录级联删行+应用层删文件；
+> 启动时清理过期片段（`audio_retention_days`）、孤儿文件、旧版临时 WAV。`save_audio=false` 时
+> 沿用临时文件并在转写后删除、不入库。
 
 ---
 
@@ -562,11 +593,13 @@ Microphone ──[PCM]──▶ Audio Capture ──[f32]──▶ Ring Buffer
 
 - **流程**：
     1. 用户点击"开始录音"。
-    2. 音频数据写入本地临时 WAV 文件（路径：`{OS temp dir}/voxink_recording_{timestamp}.wav`）。
+    2. 音频写入 WAV：`save_audio=true`（默认）时落归档目录 `{音频根}/{record_id}/{时戳}_{短id}.wav`；
+       否则落临时目录 `{OS temp dir}/voxink_recording_{timestamp}.wav`（§2.8 音频文件管理）。
     3. 用户点击"停止录音" → 关闭 WAV → UI 显示"正在识别中..."和 Loading 动画。
     4. 通过 HTTP POST 上传 WAV 至 ASR 后端。
     5. 接收完整转写结果 → 更新到文本编辑器。
-    6. 删除临时 WAV（或按设置保留以便复查）。
+    6. 持久化：把该段写入 `segments` 表（含路径/模式/文本/时长/字节数）；
+       `save_audio=false` 时改为删除临时 WAV。两种模式（实时/离线）同此归档逻辑。
 - **上传进度**：大文件上传显示进度条。
 - **超时处理**：HTTP 请求超时 120 秒（可配置），超时后提示"转写超时，请检查网络或缩短录音时长"。
 

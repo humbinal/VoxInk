@@ -71,6 +71,10 @@ pub struct VoxInk {
     streaming_fallback: bool,
     /// 停止流式时捕获的录音时长（秒），供异步完成时累加到记录时长。
     streaming_duration_secs: u32,
+    /// 流式会话累计的最终文本（用于落库为该段 segment 的 text）。
+    streaming_text: String,
+    /// 进行中/刚结束的录音元信息（用于完成时落库片段或删临时文件）。
+    active_recording: Option<ActiveRecording>,
     /// 自动保存防抖代际计数（仅最新一次定时器生效）。
     autosave_gen: u64,
     /// 设置面板覆盖层视图（M11）。
@@ -84,6 +88,18 @@ pub struct VoxInk {
 /// 实时流式会话：持有流式采集句柄（cpal 流在主线程）。
 struct StreamingSession {
     capture: StreamingCapture,
+}
+
+/// 进行中录音的元信息：完成时据此落库 segment（持久化）或删除临时文件（不持久化）。
+struct ActiveRecording {
+    /// 归属记录 id。
+    record_id: String,
+    /// WAV 文件路径。
+    path: PathBuf,
+    /// 是否持久化（保存到音频库）。false 表示临时文件，完成后删除。
+    persisted: bool,
+    /// 录制模式 "streaming" | "offline"。
+    mode: String,
 }
 
 impl VoxInk {
@@ -167,6 +183,8 @@ impl VoxInk {
             streaming: None,
             streaming_fallback: false,
             streaming_duration_secs: 0,
+            streaming_text: String::new(),
+            active_recording: None,
             autosave_gen: 0,
             settings,
             show_settings: false,
@@ -304,12 +322,26 @@ impl VoxInk {
             return;
         }
         let deleting_current = id == self.current_record_id;
-        if let Some(global) = cx.try_global::<GlobalHistory>()
-            && let Err(e) = global.0.delete_record(&id)
-        {
-            tracing::error!("删除记录失败: {e:#}");
-            window.push_notification("删除记录失败", cx);
-            return;
+        if let Some(global) = cx.try_global::<GlobalHistory>() {
+            // 先删该记录的音频文件（DB 行由外键级联删除）。
+            if let Ok(paths) = global.0.audio_paths_for_record(&id) {
+                for p in &paths {
+                    if let Err(e) = std::fs::remove_file(p) {
+                        tracing::debug!("删除音频文件失败（可能已不存在）: {e}");
+                    }
+                }
+            }
+            if let Err(e) = global.0.delete_record(&id) {
+                tracing::error!("删除记录失败: {e:#}");
+                window.push_notification("删除记录失败", cx);
+                return;
+            }
+            // 尝试删除当前根下该记录的（应已空的）目录。
+            if let Some(cfg) = cx.try_global::<GlobalConfig>()
+                && let Ok(root) = cfg.0.storage.audio_root()
+            {
+                let _ = std::fs::remove_dir_all(root.join(&id));
+            }
         }
 
         if deleting_current {
@@ -344,10 +376,78 @@ impl VoxInk {
             .unwrap_or(600)
     }
 
+    // ───────────────────────────── 音频文件管理（2026-06-16）─────────────────────────────
+
+    /// 计算本次录音的 WAV 落点：持久化时为 `{音频根}/{record_id}/{时戳}_{短id}.wav` 并建目录；
+    /// 否则（未开启保存或建目录失败）回退临时文件。返回 (路径, 是否持久化)。
+    fn prepare_recording_path(&self, cx: &Context<Self>) -> (PathBuf, bool) {
+        let cfg = cx
+            .try_global::<GlobalConfig>()
+            .map(|g| g.0.clone())
+            .unwrap_or_default();
+        if cfg.storage.save_audio
+            && !self.current_record_id.is_empty()
+            && let Ok(root) = cfg.storage.audio_root()
+        {
+            let dir = root.join(&self.current_record_id);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::warn!("创建录音目录失败，回退临时文件: {e:#}");
+            } else {
+                let name = format!(
+                    "{}_{}.wav",
+                    Local::now().format("%Y%m%d-%H%M%S"),
+                    short_id()
+                );
+                return (dir.join(name), true);
+            }
+        }
+        (crate::audio::writer::temp_wav_path(), false)
+    }
+
+    /// 记录本次录音的元信息（开始时调用）。
+    fn begin_active_recording(&mut self, path: PathBuf, persisted: bool, mode: &str) {
+        self.active_recording = Some(ActiveRecording {
+            record_id: self.current_record_id.clone(),
+            path,
+            persisted,
+            mode: mode.to_string(),
+        });
+    }
+
+    /// 完成一次录音：持久化则把音频片段落库（segments 表）；否则删除临时文件。
+    /// `text` 为该段转写结果，`duration_secs` 为时长。
+    fn finalize_segment(&mut self, text: &str, duration_secs: u32, cx: &Context<Self>) {
+        let Some(active) = self.active_recording.take() else {
+            return;
+        };
+        if !active.persisted {
+            // 未持久化：清理临时 WAV，避免泄漏。
+            if let Err(e) = std::fs::remove_file(&active.path) {
+                tracing::debug!("删除临时录音失败（可能已不存在）: {e}");
+            }
+            return;
+        }
+        let size = std::fs::metadata(&active.path).map(|m| m.len()).unwrap_or(0);
+        if let Some(g) = cx.try_global::<GlobalHistory>()
+            && let Err(e) = g.0.add_segment(
+                &active.record_id,
+                &active.path,
+                &active.mode,
+                text,
+                duration_secs,
+                size,
+            )
+        {
+            tracing::error!("录音片段落库失败: {e:#}");
+        }
+    }
+
     /// 开始录音：构建 Recorder，进入 Recording 状态，启动计时器。
     fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match Recorder::start() {
+        let (wav_path, persisted) = self.prepare_recording_path(cx);
+        match Recorder::start(wav_path.clone()) {
             Ok(recorder) => {
+                self.begin_active_recording(wav_path, persisted, "offline");
                 self.recorder = Some(recorder);
                 self.state.recording_state = RecordingState::Recording;
                 self.state.recording_duration_secs = 0;
@@ -438,13 +538,18 @@ impl VoxInk {
                         append_text(&this.editor, &text, window, cx);
                         // 追加到当前记录并累加时长（任务 10.3）。
                         this.persist_after_recording("offline", duration_secs, cx);
+                        // 录音片段落库（持久化）或清理临时文件。
+                        this.finalize_segment(&text, duration_secs, cx);
                         window.push_notification("转写完成", cx);
                     }
                     Ok(Err(e)) => {
                         tracing::error!("离线转写失败: {e}");
+                        // 转写失败仍保留音频（可重转写）。
+                        this.finalize_segment("", duration_secs, cx);
                         window.push_notification(friendly_asr_error(&e), cx);
                     }
                     Err(_) => {
+                        this.finalize_segment("", duration_secs, cx);
                         window.push_notification("转写任务已取消", cx);
                     }
                 }
@@ -476,7 +581,8 @@ impl VoxInk {
         let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<StreamingResult>(64);
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<(), AsrError>>();
 
-        let capture = match StreamingCapture::start(audio_tx) {
+        let (wav_path, persisted) = self.prepare_recording_path(cx);
+        let capture = match StreamingCapture::start(audio_tx, wav_path.clone()) {
             Ok(capture) => capture,
             Err(e) => {
                 tracing::error!("启动流式采集失败: {e}");
@@ -488,9 +594,11 @@ impl VoxInk {
                 return;
             }
         };
+        self.begin_active_recording(wav_path, persisted, "streaming");
         self.streaming = Some(StreamingSession { capture });
         self.streaming_fallback = false;
         self.streaming_duration_secs = 0;
+        self.streaming_text.clear();
         self.state.recording_state = RecordingState::Recording;
         self.state.recording_duration_secs = 0;
         self.state.pending_text.clear();
@@ -569,6 +677,10 @@ impl VoxInk {
     ) {
         if result.is_final {
             // 整句稳定：固化到编辑器（即追加到当前记录正文），清空 pending。
+            if !self.streaming_text.is_empty() {
+                self.streaming_text.push('\n');
+            }
+            self.streaming_text.push_str(&result.delta_text);
             append_text(&self.editor, &result.delta_text, window, cx);
             self.state.pending_text.clear();
         } else {
@@ -596,6 +708,9 @@ impl VoxInk {
                 // 把当前记录（含本次追加）写回 + 累加时长（任务 10.3）。
                 let added = self.streaming_duration_secs;
                 self.persist_after_recording("streaming", added, cx);
+                // 录音片段落库（持久化）或清理临时文件。
+                let seg_text = std::mem::take(&mut self.streaming_text);
+                self.finalize_segment(&seg_text, added, cx);
                 window.push_notification("识别完成", cx);
                 self.finish_to_idle(cx);
             }
@@ -603,6 +718,9 @@ impl VoxInk {
                 if let Some(session) = self.streaming.take() {
                     let _ = session.capture.stop();
                 }
+                // 鉴权失败：保留已录音频（可重转写）。
+                let added = self.streaming_duration_secs;
+                self.finalize_segment("", added, cx);
                 window.push_notification("API Key 无效，请检查后重试", cx);
                 self.finish_to_idle(cx);
             }
@@ -610,10 +728,13 @@ impl VoxInk {
                 tracing::warn!("实时识别失败: {e}");
                 self.streaming_fallback = true;
                 if self.streaming.is_some() {
-                    // 用户仍在录音：保持录制，停止后用完整 WAV 离线转写。
+                    // 用户仍在录音：保持录制，停止后用完整 WAV 离线转写（finalize 在转写完成后）。
                     window.push_notification("实时识别失败，已切换离线，停止后将转写", cx);
                     cx.notify();
                 } else {
+                    // 已停止且无回退转写：保留音频片段。
+                    let added = self.streaming_duration_secs;
+                    self.finalize_segment("", added, cx);
                     self.finish_to_idle(cx);
                 }
             }
@@ -1221,6 +1342,75 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     let mut clipboard = arboard::Clipboard::new().context("打开系统剪贴板失败")?;
     clipboard.set_text(text.to_owned()).context("写入剪贴板失败")?;
     Ok(())
+}
+
+/// 8 位短随机串（用于录音文件名去重）。
+fn short_id() -> String {
+    crate::history::db::short_uuid()
+}
+
+/// 启动时音频维护（main.rs 在打开窗口前调用）：
+/// 1) 删除过期音频片段（`audio_retention_days`）及其文件；
+/// 2) 清理当前音频根下"无对应 segment 记录"的孤儿文件（崩溃/中断残留）；
+/// 3) 清理旧版临时目录里的 `voxink_recording_*.wav`。
+pub(crate) fn cleanup_audio_on_startup(
+    db: &crate::history::db::HistoryDb,
+    storage: &crate::config::StorageConfig,
+) {
+    // 1) 过期片段。
+    match db.purge_audio_older_than(storage.audio_retention_days) {
+        Ok(paths) => {
+            for p in &paths {
+                let _ = std::fs::remove_file(p);
+            }
+            if !paths.is_empty() {
+                tracing::info!("已清理 {} 个过期录音文件", paths.len());
+            }
+        }
+        Err(e) => tracing::warn!("清理过期录音失败: {e:#}"),
+    }
+
+    // 2) 孤儿文件：当前音频根下、未被任何 segment 行引用的 .wav。
+    if let Ok(root) = storage.audio_root()
+        && root.is_dir()
+    {
+        let known: std::collections::HashSet<PathBuf> = db
+            .all_segment_paths()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut removed = 0usize;
+        // 遍历 {root}/{record_id}/*.wav。
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for dir in entries.flatten().filter(|e| e.path().is_dir()) {
+                if let Ok(files) = std::fs::read_dir(dir.path()) {
+                    for f in files.flatten() {
+                        let p = f.path();
+                        if p.extension().is_some_and(|e| e == "wav") && !known.contains(&p) {
+                            let _ = std::fs::remove_file(&p);
+                            removed += 1;
+                        }
+                    }
+                }
+                // 目录空了顺手删。
+                let _ = std::fs::remove_dir(dir.path());
+            }
+        }
+        if removed > 0 {
+            tracing::info!("已清理 {removed} 个孤儿录音文件");
+        }
+    }
+
+    // 3) 旧版临时 WAV。
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("voxink_recording_") && name.ends_with(".wav") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
 }
 
 /// 导出全部历史记录为 JSON，写入配置目录，返回文件路径（任务 10.4）。

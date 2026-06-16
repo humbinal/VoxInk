@@ -100,7 +100,7 @@ fn spawn_stream_worker(
         loop {
             let n = cons.pop_slice(&mut chunk);
             if n > 0 {
-                super::store_level(&level, super::peak_amplitude(&chunk[..n]));
+                super::store_level(&level, super::rms_amplitude(&chunk[..n]));
                 interleaved.extend_from_slice(&chunk[..n]);
                 pcm.clear();
                 downmix_resample(&mut interleaved, channels, &mut resampler, &mut mono, &mut pcm)?;

@@ -213,8 +213,8 @@ fn spawn_worker(
         loop {
             let n = cons.pop_slice(&mut chunk);
             if n > 0 {
-                // 更新实时电平（取本次采集块峰值），供 UI 绘制波形。
-                super::store_level(&level, super::peak_amplitude(&chunk[..n]));
+                // 更新实时电平（取本次采集块 RMS），供 UI 绘制波形。
+                super::store_level(&level, super::rms_amplitude(&chunk[..n]));
                 interleaved.extend_from_slice(&chunk[..n]);
                 total += drain_frames(
                     &mut interleaved,

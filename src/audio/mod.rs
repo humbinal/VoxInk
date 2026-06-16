@@ -36,9 +36,16 @@ pub fn load_level(meter: &AtomicU32) -> f32 {
     f32::from_bits(meter.load(Ordering::Relaxed))
 }
 
-/// 计算一段交织 f32 样本的峰值幅度（绝对值最大）。
-pub fn peak_amplitude(samples: &[f32]) -> f32 {
-    samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
+/// 计算一段 f32 样本的 RMS（均方根）幅度，反映感知响度/能量。
+///
+/// 不用峰值：语音瞬态尖峰极易逼近满量程，峰值表会"动不动就满格"；RMS 比峰值低约 15-20dB
+/// 且更平滑，更适合做电平表（§6.2 波形）。
+pub fn rms_amplitude(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
 }
 
 /// 音频子系统错误（任务 3.1：设备不可用返回明确错误类型）。

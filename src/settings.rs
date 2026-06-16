@@ -15,7 +15,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     switch::Switch,
-    v_flex, ActiveTheme, Sizable, WindowExt,
+    v_flex, ActiveTheme, IconName, Sizable, WindowExt,
 };
 
 use crate::app::{friendly_asr_error, runtime_asr_config, GlobalConfig, GlobalTokioHandle};
@@ -387,7 +387,8 @@ impl SettingsView {
         }
     }
 
-    fn on_done(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// 保存当前页配置：把输入框并入内存配置并落盘（停留在面板，给出反馈）。
+    fn on_save(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_inputs_to_config(cx);
         if let Some(c) = cx.try_global::<GlobalConfig>().map(|g| g.0.clone())
             && let Err(e) = c.save()
@@ -395,7 +396,20 @@ impl SettingsView {
             tracing::error!("保存配置失败: {e:#}");
         }
         window.push_notification(tr("settings.saved"), cx);
+    }
+
+    /// 关闭设置面板（右上角 X）。即时生效项（开关/主题等）已落入内存配置，
+    /// 退出应用时统一持久化；未点「保存」的输入框文本不写盘。
+    fn on_close(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
         cx.emit(SettingsEvent::Closed);
+    }
+
+    /// 当前标签是否含可保存配置（关于/快捷键为只读）。
+    fn tab_is_editable(&self) -> bool {
+        matches!(
+            self.active_tab,
+            SettingsTab::Asr | SettingsTab::Recording | SettingsTab::General | SettingsTab::Data
+        )
     }
 
     fn set_theme(&mut self, theme: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -850,7 +864,7 @@ impl Render for SettingsView {
             .child(
                 v_flex()
                     .w(px(600.))
-                    .max_h(px(600.))
+                    .h(px(560.))
                     .bg(cx.theme().background)
                     .border_1()
                     .border_color(cx.theme().border)
@@ -871,10 +885,10 @@ impl Render for SettingsView {
                                     .child(tr("settings.title")),
                             )
                             .child(
-                                Button::new("settings-done")
-                                    .primary()
-                                    .label(tr("settings.done"))
-                                    .on_click(cx.listener(Self::on_done)),
+                                Button::new("settings-close")
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .on_click(cx.listener(Self::on_close)),
                             ),
                     )
                     .child(
@@ -885,7 +899,27 @@ impl Render for SettingsView {
                             .w_full()
                             .child(self.render_tab_rail(cx))
                             .child(body),
-                    ),
+                    )
+                    // 可保存页面底部：保存按钮（右下角）。
+                    .when(self.tab_is_editable(), |this| {
+                        this.child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .items_center()
+                                .px_4()
+                                .py_2()
+                                .border_t_1()
+                                .border_color(cx.theme().border)
+                                .child(
+                                    Button::new("settings-save")
+                                        .primary()
+                                        .small()
+                                        .label(tr("settings.save"))
+                                        .on_click(cx.listener(Self::on_save)),
+                                ),
+                        )
+                    }),
             )
     }
 }

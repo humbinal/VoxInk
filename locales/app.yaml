@@ -99,6 +99,9 @@ settings.title:
 settings.done:
   zh-CN: 完成
   en: Done
+settings.save:
+  zh-CN: 保存
+  en: Save
 settings.section.asr:
   zh-CN: ASR 服务
   en: ASR Service

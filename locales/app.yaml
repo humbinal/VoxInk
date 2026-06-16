@@ -52,6 +52,26 @@ group.older:
   zh-CN: 更早
   en: Older
 
+# 录音片段
+segments.title:
+  zh-CN: 录音片段
+  en: Recordings
+segments.empty:
+  zh-CN: 该记录暂无录音片段
+  en: No recordings for this entry
+segments.no_text:
+  zh-CN: （无文字）
+  en: (no text)
+segments.play:
+  zh-CN: 播放
+  en: Play
+segments.retranscribe:
+  zh-CN: 重新转写
+  en: Re-transcribe
+segments.delete:
+  zh-CN: 删除片段
+  en: Delete segment
+
 # 编辑区 / 底栏
 editor.placeholder:
   zh-CN: 点击「开始录音」用语音输入提示词，或直接在此编辑……

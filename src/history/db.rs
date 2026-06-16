@@ -346,6 +346,33 @@ impl HistoryDb {
             .collect())
     }
 
+    /// 删除单段片段，返回其音频文件路径（供应用层删文件）。
+    pub fn delete_segment(&self, id: &str) -> Result<Option<PathBuf>> {
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT file_path FROM segments WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok();
+        self.conn
+            .execute("DELETE FROM segments WHERE id = ?1", params![id])
+            .context("删除片段失败")?;
+        Ok(path.map(PathBuf::from))
+    }
+
+    /// 更新某段片段的转写文本（重转写后回填）。
+    pub fn update_segment_text(&self, id: &str, text: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE segments SET text = ?2 WHERE id = ?1",
+                params![id, text],
+            )
+            .context("更新片段文本失败")?;
+        Ok(())
+    }
+
     /// 全部片段的音频文件路径（用于启动时孤儿文件对账）。
     pub fn all_segment_paths(&self) -> Result<Vec<PathBuf>> {
         let mut stmt = self.conn.prepare("SELECT file_path FROM segments")?;

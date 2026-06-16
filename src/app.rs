@@ -28,7 +28,7 @@ use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{AudioError, Recorder, StreamingCapture};
 use crate::config::VoxInkConfig;
-use crate::history::db::Record;
+use crate::history::db::{Record, Segment};
 use crate::history::GlobalHistory;
 use crate::i18n::tr;
 use crate::settings::{SettingsEvent, SettingsView};
@@ -77,6 +77,10 @@ pub struct VoxInk {
     active_recording: Option<ActiveRecording>,
     /// 自动保存防抖代际计数（仅最新一次定时器生效）。
     autosave_gen: u64,
+    /// 当前记录的录音片段列表（随记录切换/录制/删除刷新）。
+    segments: Vec<Segment>,
+    /// 是否展开右侧"录音片段"面板。
+    show_segments: bool,
     /// 设置面板覆盖层视图（M11）。
     settings: Entity<SettingsView>,
     /// 是否显示设置面板覆盖层。
@@ -143,6 +147,12 @@ impl VoxInk {
             editor.update(cx, |s, cx| s.set_value(initial_text, window, cx));
         }
 
+        // 当前记录的录音片段。
+        let segments = cx
+            .try_global::<GlobalHistory>()
+            .and_then(|g| g.0.list_segments(&current_record_id).ok())
+            .unwrap_or_default();
+
         // 启动时聚焦编辑器，便于直接键盘输入。
         let focus_handle = editor.focus_handle(cx);
         window.defer(cx, move |window, cx| {
@@ -185,6 +195,8 @@ impl VoxInk {
             streaming_duration_secs: 0,
             streaming_text: String::new(),
             active_recording: None,
+            segments,
+            show_segments: false,
             autosave_gen: 0,
             settings,
             show_settings: false,
@@ -291,6 +303,7 @@ impl VoxInk {
         self.current_record_id = new_rec.id;
         self.editor.update(cx, |s, cx| s.set_value("", window, cx));
         self.refresh_records(cx);
+        self.refresh_segments(cx);
         let focus_handle = self.editor.focus_handle(cx);
         focus_handle.focus(window, cx);
     }
@@ -313,6 +326,7 @@ impl VoxInk {
             self.editor.update(cx, |s, cx| s.set_value(rec.text, window, cx));
         }
         self.refresh_records(cx);
+        self.refresh_segments(cx);
     }
 
     /// 删除一条记录；若删的是当前记录，则切到最近一条（无则新建空记录）。
@@ -366,6 +380,7 @@ impl VoxInk {
                     self.editor.update(cx, |s, cx| s.set_value("", window, cx));
                 }
             }
+            self.refresh_segments(cx);
         }
         self.refresh_records(cx);
     }
@@ -416,7 +431,7 @@ impl VoxInk {
 
     /// 完成一次录音：持久化则把音频片段落库（segments 表）；否则删除临时文件。
     /// `text` 为该段转写结果，`duration_secs` 为时长。
-    fn finalize_segment(&mut self, text: &str, duration_secs: u32, cx: &Context<Self>) {
+    fn finalize_segment(&mut self, text: &str, duration_secs: u32, cx: &mut Context<Self>) {
         let Some(active) = self.active_recording.take() else {
             return;
         };
@@ -428,6 +443,7 @@ impl VoxInk {
             return;
         }
         let size = std::fs::metadata(&active.path).map(|m| m.len()).unwrap_or(0);
+        let same_record = active.record_id == self.current_record_id;
         if let Some(g) = cx.try_global::<GlobalHistory>()
             && let Err(e) = g.0.add_segment(
                 &active.record_id,
@@ -440,6 +456,96 @@ impl VoxInk {
         {
             tracing::error!("录音片段落库失败: {e:#}");
         }
+        // 若片段属于当前记录，刷新右侧片段列表。
+        if same_record {
+            self.refresh_segments(cx);
+        }
+    }
+
+    /// 重新查询当前记录的录音片段并刷新 UI。
+    fn refresh_segments(&mut self, cx: &mut Context<Self>) {
+        self.segments = cx
+            .try_global::<GlobalHistory>()
+            .and_then(|g| g.0.list_segments(&self.current_record_id).ok())
+            .unwrap_or_default();
+        cx.notify();
+    }
+
+    // ───────────────────────────── 录音片段操作（回放/重转写/删除）─────────────────────────────
+
+    /// 切换"录音片段"面板展开/收起。
+    fn on_toggle_segments(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.show_segments = !self.show_segments;
+        cx.notify();
+    }
+
+    /// 用系统默认播放器打开音频文件（回放）。
+    fn play_segment(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let p = PathBuf::from(&path);
+        if p.exists() {
+            cx.open_with_system(&p);
+        } else {
+            window.push_notification("音频文件不存在（可能已被清理）", cx);
+        }
+    }
+
+    /// 删除单段：删文件 + 删行 + 刷新。
+    fn delete_segment(&mut self, seg_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(g) = cx.try_global::<GlobalHistory>() {
+            match g.0.delete_segment(&seg_id) {
+                Ok(Some(path)) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!("删除片段失败: {e:#}");
+                    window.push_notification("删除片段失败", cx);
+                    return;
+                }
+            }
+        }
+        self.refresh_segments(cx);
+    }
+
+    /// 重新转写某段音频：离线后端转写 → 追加到正文 + 回填该段文本 + 刷新。
+    fn retranscribe_segment(&mut self, seg_id: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let wav = PathBuf::from(&path);
+        if !wav.exists() {
+            window.push_notification("音频文件不存在（可能已被清理）", cx);
+            return;
+        }
+        let asr_config = runtime_asr_config(cx, false);
+        let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+            return;
+        };
+        window.push_notification("重新转写中…", cx);
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            handle.spawn(async move {
+                let result = run_offline_transcription(asr_config, wav).await;
+                let _ = tx.send(result);
+            });
+            let outcome = rx.await;
+            let _ = this.update_in(cx, |this, window, cx| match outcome {
+                Ok(Ok(text)) => {
+                    append_text(&this.editor, &text, window, cx);
+                    this.flush_editor_to_record(cx);
+                    if let Some(g) = cx.try_global::<GlobalHistory>() {
+                        let _ = g.0.update_segment_text(&seg_id, &text);
+                    }
+                    this.refresh_records(cx);
+                    this.refresh_segments(cx);
+                    window.push_notification("重新转写完成", cx);
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("重新转写失败: {e}");
+                    window.push_notification(friendly_asr_error(&e), cx);
+                }
+                Err(_) => window.push_notification("重新转写已取消", cx),
+            });
+        })
+        .detach();
     }
 
     /// 开始录音：构建 Recorder，进入 Recording 状态，启动计时器。
@@ -1308,6 +1414,16 @@ impl VoxInk {
                     .gap_2()
                     .items_center()
                     .child(
+                        Button::new("toggle-segments")
+                            .ghost()
+                            .small()
+                            .icon(IconName::GalleryVerticalEnd)
+                            .tooltip(tr("segments.title"))
+                            .when(self.show_segments, |b| b.primary())
+                            .label(format!("{}", self.segments.len()))
+                            .on_click(cx.listener(Self::on_toggle_segments)),
+                    )
+                    .child(
                         Button::new("open-recordings")
                             .ghost()
                             .small()
@@ -1332,6 +1448,123 @@ impl VoxInk {
                         tr("footer.copy")
                     })
                     .on_click(cx.listener(Self::on_copy)),
+            )
+    }
+
+    /// 右侧"录音片段"面板：当前记录的多段录音，支持回放/重转写/删除。
+    fn render_segments(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel = v_flex()
+            .w_full()
+            .max_h(px(200.))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .px_4()
+                    .py_2()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("{} ({})", tr("segments.title"), self.segments.len())),
+            );
+
+        if self.segments.is_empty() {
+            return panel.child(
+                div()
+                    .px_4()
+                    .pb_3()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr("segments.empty")),
+            );
+        }
+
+        let mut list = v_flex()
+            .id("segment-list")
+            .w_full()
+            .gap_0p5()
+            .px_2()
+            .pb_2()
+            .overflow_y_scroll();
+        for seg in &self.segments {
+            list = list.child(self.render_segment_row(seg, cx));
+        }
+        panel.child(list)
+    }
+
+    fn render_segment_row(&self, seg: &Segment, cx: &mut Context<Self>) -> impl IntoElement {
+        let snippet = seg
+            .text
+            .lines()
+            .next()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| tr("segments.no_text"));
+        let path = seg.file_path.clone();
+        let id_re = seg.id.clone();
+        let id_del = seg.id.clone();
+        let path_play = path.clone();
+        let path_re = path.clone();
+
+        h_flex()
+            .id(elem_id("seg", &seg.id))
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(px(6.))
+            .hover(|s| s.bg(cx.theme().list_hover))
+            .child(div().size(px(6.)).rounded_full().bg(mode_dot(&seg.mode, cx)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .overflow_hidden()
+                    .gap_0p5()
+                    .child(div().w_full().text_sm().truncate().child(snippet))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(time_label(&seg.created_at))
+                            .child(fmt_duration(seg.duration_secs))
+                            .child(fmt_size(seg.byte_size)),
+                    ),
+            )
+            .child(
+                Button::new(elem_id("seg-play", &seg.id))
+                    .ghost()
+                    .small()
+                    .icon(IconName::Play)
+                    .tooltip(tr("segments.play"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.play_segment(path_play.clone(), window, cx)
+                    })),
+            )
+            .child(
+                Button::new(elem_id("seg-re", &seg.id))
+                    .ghost()
+                    .small()
+                    .icon(IconName::Redo)
+                    .tooltip(tr("segments.retranscribe"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.retranscribe_segment(id_re.clone(), path_re.clone(), window, cx)
+                    })),
+            )
+            .child(
+                Button::new(elem_id("seg-del", &seg.id))
+                    .ghost()
+                    .small()
+                    .icon(IconName::Close)
+                    .tooltip(tr("segments.delete"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.delete_segment(id_del.clone(), window, cx)
+                    })),
             )
     }
 }
@@ -1359,6 +1592,9 @@ impl Render for VoxInk {
                             .h_full()
                             .child(self.render_controls(cx))
                             .child(self.render_editor(cx))
+                            .when(self.show_segments, |this| {
+                                this.child(self.render_segments(cx))
+                            })
                             .child(self.render_footer(cx)),
                     ),
             )
@@ -1585,6 +1821,24 @@ impl RecordGlyph {
             ),
             RecordGlyph::None => None,
         }
+    }
+}
+
+/// 秒数格式化为 `MM:SS`。
+fn fmt_duration(secs: u32) -> String {
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+/// 人类可读字节数。
+fn fmt_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{:.1} MB", b / (KB * KB))
     }
 }
 

@@ -199,6 +199,9 @@ settings.browse:
 settings.open_folder:
   zh-CN: 打开
   en: Open
+settings.text_retention:
+  zh-CN: 记录保留天数（0=永久）
+  en: Record retention days (0 = forever)
 settings.audio_retention:
   zh-CN: 音频保留天数（0=永久）
   en: Audio retention days (0 = forever)

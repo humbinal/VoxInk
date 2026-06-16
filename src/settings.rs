@@ -55,6 +55,8 @@ pub struct SettingsView {
     // 数据/存储
     audio_dir: Entity<InputState>,
     audio_retention: Entity<InputState>,
+    /// 文本记录保留天数（text.history_retention_days）。
+    text_retention: Entity<InputState>,
     /// 音频根目录当前占用字节数（打开设置/清理后刷新）。
     audio_usage_bytes: u64,
 }
@@ -81,6 +83,7 @@ impl SettingsView {
                 InputState::new(window, cx).placeholder(tr("settings.audio_dir_ph"))
             }),
             audio_retention: input(window, cx),
+            text_retention: input(window, cx),
             audio_usage_bytes: 0,
         }
     }
@@ -97,6 +100,9 @@ impl SettingsView {
             .update(cx, |s, cx| s.set_value(c.storage.audio_dir.clone(), window, cx));
         self.audio_retention.update(cx, |s, cx| {
             s.set_value(c.storage.audio_retention_days.to_string(), window, cx)
+        });
+        self.text_retention.update(cx, |s, cx| {
+            s.set_value(c.text.history_retention_days.to_string(), window, cx)
         });
         self.audio_usage_bytes = c
             .storage
@@ -153,11 +159,15 @@ impl SettingsView {
         let max = self.max_secs.read(cx).value().to_string();
         let audio_dir = self.audio_dir.read(cx).value().to_string();
         let audio_retention = self.audio_retention.read(cx).value().to_string();
+        let text_retention = self.text_retention.read(cx).value().to_string();
 
         self.update_config(cx, |c| {
             c.storage.audio_dir = audio_dir.trim().to_string();
             if let Ok(n) = audio_retention.trim().parse::<u32>() {
                 c.storage.audio_retention_days = n;
+            }
+            if let Ok(n) = text_retention.trim().parse::<u32>() {
+                c.text.history_retention_days = n;
             }
             let sid = c.asr.streaming_backend.clone();
             let s = c.asr.backends.entry(sid).or_default();
@@ -712,6 +722,10 @@ impl Render for SettingsView {
                     .text_color(cx.theme().muted_foreground)
                     .child(tr("settings.audio_dir_hint")),
             )
+            .child(self.labeled(
+                "settings.text_retention",
+                div().w(px(120.)).child(Input::new(&self.text_retention)),
+            ))
             .child(self.labeled(
                 "settings.audio_retention",
                 div().w(px(120.)).child(Input::new(&self.audio_retention)),

@@ -6,6 +6,8 @@
 //! - 录制中禁用「新建」与切换记录；正文手动编辑防抖自动保存。
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -26,7 +28,7 @@ use crate::theme::{brand_tint, BRAND, DANGER, STATUS_IDLE, STATUS_PROCESSING, ST
 
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
-use crate::audio::{AudioError, Recorder, StreamingCapture};
+use crate::audio::{load_level, AudioError, LevelMeter, Recorder, StreamingCapture};
 use crate::config::VoxInkConfig;
 use crate::history::db::{Record, Segment};
 use crate::history::GlobalHistory;
@@ -75,6 +77,10 @@ pub struct VoxInk {
     streaming_text: String,
     /// 进行中/刚结束的录音元信息（用于完成时落库片段或删临时文件）。
     active_recording: Option<ActiveRecording>,
+    /// 录音 worker 写入的实时电平（峰值幅度 0..1）。
+    level_meter: LevelMeter,
+    /// 近期电平历史（用于绘制滚动波形）。
+    levels: Vec<f32>,
     /// 自动保存防抖代际计数（仅最新一次定时器生效）。
     autosave_gen: u64,
     /// 当前记录的录音片段列表（随记录切换/录制/删除刷新）。
@@ -195,6 +201,8 @@ impl VoxInk {
             streaming_duration_secs: 0,
             streaming_text: String::new(),
             active_recording: None,
+            level_meter: Arc::new(AtomicU32::new(0)),
+            levels: Vec::new(),
             segments,
             show_segments: false,
             autosave_gen: 0,
@@ -551,16 +559,20 @@ impl VoxInk {
     /// 开始录音：构建 Recorder，进入 Recording 状态，启动计时器。
     fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (wav_path, persisted) = self.prepare_recording_path(cx);
-        match Recorder::start(wav_path.clone()) {
+        let level: LevelMeter = Arc::new(AtomicU32::new(0));
+        match Recorder::start(wav_path.clone(), level.clone()) {
             Ok(recorder) => {
                 self.begin_active_recording(wav_path, persisted, "offline");
                 self.recorder = Some(recorder);
+                self.level_meter = level;
+                self.levels.clear();
                 self.state.recording_state = RecordingState::Recording;
                 self.state.recording_duration_secs = 0;
                 tracing::info!("开始录音");
                 cx.notify();
                 let max = self.max_recording_seconds(cx);
                 self.spawn_timer(window, cx, max);
+                self.spawn_level_poll(window, cx);
             }
             Err(e) => {
                 tracing::error!("启动录音失败: {e}");
@@ -688,7 +700,8 @@ impl VoxInk {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<(), AsrError>>();
 
         let (wav_path, persisted) = self.prepare_recording_path(cx);
-        let capture = match StreamingCapture::start(audio_tx, wav_path.clone()) {
+        let level: LevelMeter = Arc::new(AtomicU32::new(0));
+        let capture = match StreamingCapture::start(audio_tx, wav_path.clone(), level.clone()) {
             Ok(capture) => capture,
             Err(e) => {
                 tracing::error!("启动流式采集失败: {e}");
@@ -702,6 +715,8 @@ impl VoxInk {
         };
         self.begin_active_recording(wav_path, persisted, "streaming");
         self.streaming = Some(StreamingSession { capture });
+        self.level_meter = level;
+        self.levels.clear();
         self.streaming_fallback = false;
         self.streaming_duration_secs = 0;
         self.streaming_text.clear();
@@ -726,6 +741,7 @@ impl VoxInk {
 
         let max = self.max_recording_seconds(cx);
         self.spawn_timer(window, cx, max);
+        self.spawn_level_poll(window, cx);
 
         // 前台读取增量结果并更新 UI；通道关闭后取后端最终状态。
         cx.spawn_in(window, async move |this, cx| {
@@ -875,6 +891,43 @@ impl VoxInk {
                             this.stop_capture(window, cx, true);
                             return true;
                         }
+                        false
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 波形保留的电平样本数（约 = 面板可容纳的竖条数）。
+    const LEVEL_HISTORY: usize = 56;
+
+    /// 追加一个电平样本到历史（超出容量丢弃最旧）。
+    fn push_level(&mut self, v: f32) {
+        if self.levels.len() >= Self::LEVEL_HISTORY {
+            self.levels.remove(0);
+        }
+        self.levels.push(v);
+    }
+
+    /// 录音期间按 ~60ms 轮询实时电平并刷新波形（录音结束自动退出）。
+    fn spawn_level_poll(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(60))
+                    .await;
+                let stop = this
+                    .update(cx, |this, cx| {
+                        if this.state.recording_state != RecordingState::Recording {
+                            return true;
+                        }
+                        let lvl = load_level(&this.level_meter);
+                        this.push_level(lvl);
+                        cx.notify();
                         false
                     })
                     .unwrap_or(true);
@@ -1273,8 +1326,8 @@ impl VoxInk {
             .items_center()
             .justify_center()
             .gap_2()
-            .w_full()
-            .h(px(46.))
+            .w(px(148.))
+            .h(px(44.))
             .rounded(px(10.))
             .bg(bg)
             .text_color(white())
@@ -1313,59 +1366,37 @@ impl VoxInk {
     }
 
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (status_text, status_color) = self.status();
-        let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
+        let recording = self.state.recording_state == RecordingState::Recording;
 
         v_flex()
             .w_full()
-            .gap_2p5()
+            .gap_2()
             .px_4()
             .pt_4()
             .pb_3()
-            .items_center()
-            .child(self.render_record_button(cx))
-            // 转录模式切换：实时 / 离线
+            // 单行工具条：录音按钮 + 中部（波形/模式切换）+ 状态胶囊。
             .child(
                 h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("mode-streaming")
-                            .when(is_streaming, |b| b.primary())
-                            .when(!is_streaming, |b| b.outline())
-                            .label(tr("mode.streaming"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.on_select_mode(TranscriptionMode::Streaming, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("mode-offline")
-                            .when(!is_streaming, |b| b.primary())
-                            .when(is_streaming, |b| b.outline())
-                            .label(tr("mode.offline"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.on_select_mode(TranscriptionMode::Offline, cx)
-                            })),
-                    ),
-            )
-            // 状态指示胶囊：· 状态  MM:SS
-            .child(
-                h_flex()
-                    .gap_1p5()
+                    .w_full()
                     .items_center()
-                    .px_2p5()
-                    .py_1()
-                    .rounded_full()
-                    .bg(cx.theme().muted)
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().size(px(7.)).rounded_full().bg(status_color))
-                    .child(status_text)
+                    .gap_3()
+                    .child(self.render_record_button(cx))
                     .child(
+                        // 中部弹性区：录音时显示实时波形，否则显示模式切换。
                         div()
-                            .text_xs()
-                            .font_family("Consolas")
-                            .child(self.duration_label()),
-                    ),
+                            .flex_1()
+                            .h(px(44.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .overflow_hidden()
+                            .child(if recording {
+                                self.render_waveform(cx).into_any_element()
+                            } else {
+                                self.render_mode_toggle(cx).into_any_element()
+                            }),
+                    )
+                    .child(self.render_status(cx)),
             )
             // 实时识别未稳定文本（pending）：浅色显示以区分稳定结果（§4.2.1）。
             .when(!self.state.pending_text.is_empty(), |this| {
@@ -1382,6 +1413,88 @@ impl VoxInk {
                         .child(self.state.pending_text.clone()),
                 )
             })
+    }
+
+    /// 转录模式切换（实时 / 离线）。
+    fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("mode-streaming")
+                    .when(is_streaming, |b| b.primary())
+                    .when(!is_streaming, |b| b.outline())
+                    .label(tr("mode.streaming"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.on_select_mode(TranscriptionMode::Streaming, cx)
+                    })),
+            )
+            .child(
+                Button::new("mode-offline")
+                    .when(!is_streaming, |b| b.primary())
+                    .when(is_streaming, |b| b.outline())
+                    .label(tr("mode.offline"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.on_select_mode(TranscriptionMode::Offline, cx)
+                    })),
+            )
+    }
+
+    /// 状态胶囊：● 状态 + MM:SS。
+    fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (status_text, status_color) = self.status();
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .flex_shrink_0()
+            .px_2p5()
+            .py_1()
+            .rounded_full()
+            .bg(cx.theme().muted)
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().size(px(7.)).rounded_full().bg(status_color))
+            .child(status_text)
+            .child(
+                div()
+                    .text_xs()
+                    .font_family("Consolas")
+                    .child(self.duration_label()),
+            )
+    }
+
+    /// 实时电平波形：把近期电平历史画成一排竖条（左旧右新，随声音起伏）。
+    fn render_waveform(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = h_flex()
+            .w_full()
+            .h_full()
+            .items_center()
+            .justify_center()
+            .gap_0p5();
+
+        if self.levels.iter().all(|&l| l < 0.001) {
+            // 尚无明显输入：提示"聆听中"。
+            return row.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr("record.listening")),
+            );
+        }
+
+        for &l in &self.levels {
+            // 峰值 0..1 加增益后映射到 3..30px；轻微非线性让小音量也可见。
+            let norm = (l * 3.2).min(1.0).powf(0.7);
+            let h = 3.0 + norm * 27.0;
+            row = row.child(
+                div()
+                    .w(px(3.))
+                    .h(px(h))
+                    .rounded_full()
+                    .bg(STATUS_RECORDING),
+            );
+        }
+        row
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {

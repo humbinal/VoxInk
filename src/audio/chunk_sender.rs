@@ -17,7 +17,7 @@ use super::buffer::AudioCons;
 use super::capture::open_capture;
 use super::resample::MonoResampler;
 use super::writer::{create_writer, WavSink};
-use super::{AudioError, RecordingOutcome};
+use super::{AudioError, LevelMeter, RecordingOutcome};
 
 /// 16kHz 下 100ms = 1600 样本；i16 即 3200 字节。
 const FRAME_SAMPLES: usize = 1600;
@@ -33,7 +33,12 @@ pub struct StreamingCapture {
 
 impl StreamingCapture {
     /// 启动流式采集：PCM 100ms 帧经 `audio_tx` 发送，同时写本地 WAV（`wav_path`，回退/留存用）。
-    pub fn start(audio_tx: Sender<Vec<u8>>, wav_path: PathBuf) -> Result<Self, AudioError> {
+    /// `level` 供 UI 绘制实时波形。
+    pub fn start(
+        audio_tx: Sender<Vec<u8>>,
+        wav_path: PathBuf,
+        level: LevelMeter,
+    ) -> Result<Self, AudioError> {
         let cap = open_capture()?;
         let writer = create_writer(&wav_path)?;
         let resampler = MonoResampler::new(cap.input_rate)?;
@@ -46,6 +51,7 @@ impl StreamingCapture {
             wav_path,
             audio_tx,
             stop_flag.clone(),
+            level,
         );
         Ok(Self {
             stream: cap.stream,
@@ -71,6 +77,7 @@ impl Drop for StreamingCapture {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 内部 spawn 助手：参数皆为采集管线一次性入参
 fn spawn_stream_worker(
     mut cons: AudioCons,
     mut resampler: MonoResampler,
@@ -79,6 +86,7 @@ fn spawn_stream_worker(
     wav_path: PathBuf,
     audio_tx: Sender<Vec<u8>>,
     stop_flag: Arc<AtomicBool>,
+    level: LevelMeter,
 ) -> JoinHandle<Result<RecordingOutcome, AudioError>> {
     std::thread::spawn(move || -> Result<RecordingOutcome, AudioError> {
         let started = Instant::now();
@@ -92,6 +100,7 @@ fn spawn_stream_worker(
         loop {
             let n = cons.pop_slice(&mut chunk);
             if n > 0 {
+                super::store_level(&level, super::peak_amplitude(&chunk[..n]));
                 interleaved.extend_from_slice(&chunk[..n]);
                 pcm.clear();
                 downmix_resample(&mut interleaved, channels, &mut resampler, &mut mono, &mut pcm)?;

@@ -16,7 +16,7 @@ use ringbuf::traits::{Consumer, Producer};
 use super::buffer::{new_buffer, AudioCons, AudioProd};
 use super::resample::MonoResampler;
 use super::writer::{create_writer, WavSink};
-use super::{AudioError, RecordingOutcome};
+use super::{AudioError, LevelMeter, RecordingOutcome};
 
 /// 录音会话句柄。持有 cpal 流（主线程）、停止标志与 worker 线程句柄。
 pub struct Recorder {
@@ -78,8 +78,8 @@ pub(crate) fn open_capture() -> Result<OpenCapture, AudioError> {
 
 impl Recorder {
     /// 探测默认输入设备、构建采集流并开始录音（WAV 写入 `wav_path`）。
-    /// 路径由调用方决定（持久化时为记录目录，否则为临时目录）。
-    pub fn start(wav_path: PathBuf) -> Result<Self, AudioError> {
+    /// 路径由调用方决定（持久化时为记录目录，否则为临时目录）；`level` 供 UI 绘制实时波形。
+    pub fn start(wav_path: PathBuf, level: LevelMeter) -> Result<Self, AudioError> {
         let cap = open_capture()?;
         let writer = create_writer(&wav_path)?;
         let resampler = MonoResampler::new(cap.input_rate)?;
@@ -91,6 +91,7 @@ impl Recorder {
             writer,
             cap.channels as usize,
             stop_flag.clone(),
+            level,
         );
 
         Ok(Self {
@@ -200,6 +201,7 @@ fn spawn_worker(
     mut writer: WavSink,
     channels: usize,
     stop_flag: Arc<AtomicBool>,
+    level: LevelMeter,
 ) -> JoinHandle<Result<u64, AudioError>> {
     std::thread::spawn(move || -> Result<u64, AudioError> {
         let mut interleaved: Vec<f32> = Vec::with_capacity(8192);
@@ -211,6 +213,8 @@ fn spawn_worker(
         loop {
             let n = cons.pop_slice(&mut chunk);
             if n > 0 {
+                // 更新实时电平（取本次采集块峰值），供 UI 绘制波形。
+                super::store_level(&level, super::peak_amplitude(&chunk[..n]));
                 interleaved.extend_from_slice(&chunk[..n]);
                 total += drain_frames(
                     &mut interleaved,

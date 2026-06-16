@@ -178,6 +178,33 @@ settings.shortcuts_hint:
 settings.section.data:
   zh-CN: 数据
   en: Data
+settings.save_audio:
+  zh-CN: 保存录音音频
+  en: Save recorded audio
+settings.audio_dir:
+  zh-CN: 录音存储位置
+  en: Recordings folder
+settings.audio_dir_ph:
+  zh-CN: 留空使用默认位置
+  en: Empty = default location
+settings.audio_dir_hint:
+  zh-CN: 更改仅对新录音生效；已有录音文件留在原位置不迁移
+  en: Changes apply to new recordings only; existing files stay where they are
+settings.browse:
+  zh-CN: 浏览…
+  en: Browse…
+settings.open_folder:
+  zh-CN: 打开
+  en: Open
+settings.audio_retention:
+  zh-CN: 音频保留天数（0=永久）
+  en: Audio retention days (0 = forever)
+settings.audio_usage:
+  zh-CN: 占用空间
+  en: Disk usage
+settings.clean_audio:
+  zh-CN: 清理过期音频
+  en: Clean expired audio
 settings.export_history:
   zh-CN: 导出全部历史
   en: Export all history

@@ -52,6 +52,11 @@ pub struct SettingsView {
     off_oss_ak_id: Entity<InputState>,
     off_oss_ak_secret: Entity<InputState>,
     open_dropdown: Dropdown,
+    // 数据/存储
+    audio_dir: Entity<InputState>,
+    audio_retention: Entity<InputState>,
+    /// 音频根目录当前占用字节数（打开设置/清理后刷新）。
+    audio_usage_bytes: u64,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -72,6 +77,11 @@ impl SettingsView {
             off_oss_ak_id: input(window, cx),
             off_oss_ak_secret: input(window, cx),
             open_dropdown: Dropdown::None,
+            audio_dir: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(tr("settings.audio_dir_ph"))
+            }),
+            audio_retention: input(window, cx),
+            audio_usage_bytes: 0,
         }
     }
 
@@ -83,6 +93,16 @@ impl SettingsView {
         self.max_secs.update(cx, |s, cx| {
             s.set_value(c.asr.max_recording_seconds.to_string(), window, cx)
         });
+        self.audio_dir
+            .update(cx, |s, cx| s.set_value(c.storage.audio_dir.clone(), window, cx));
+        self.audio_retention.update(cx, |s, cx| {
+            s.set_value(c.storage.audio_retention_days.to_string(), window, cx)
+        });
+        self.audio_usage_bytes = c
+            .storage
+            .audio_root()
+            .map(|root| dir_size(&root))
+            .unwrap_or(0);
         self.load_stream_inputs(&c, window, cx);
         self.load_offline_inputs(&c, window, cx);
     }
@@ -131,8 +151,14 @@ impl SettingsView {
         let oss_id = self.off_oss_ak_id.read(cx).value().to_string();
         let oss_secret = self.off_oss_ak_secret.read(cx).value().to_string();
         let max = self.max_secs.read(cx).value().to_string();
+        let audio_dir = self.audio_dir.read(cx).value().to_string();
+        let audio_retention = self.audio_retention.read(cx).value().to_string();
 
         self.update_config(cx, |c| {
+            c.storage.audio_dir = audio_dir.trim().to_string();
+            if let Ok(n) = audio_retention.trim().parse::<u32>() {
+                c.storage.audio_retention_days = n;
+            }
             let sid = c.asr.streaming_backend.clone();
             let s = c.asr.backends.entry(sid).or_default();
             s.api_key = s_key.trim().to_string();
@@ -216,6 +242,84 @@ impl SettingsView {
             });
         })
         .detach();
+    }
+
+    /// 当前生效的音频根目录（配置非空则用之，否则默认）。
+    fn current_audio_root(&self, cx: &Context<Self>) -> Option<std::path::PathBuf> {
+        cx.try_global::<GlobalConfig>()
+            .and_then(|g| g.0.storage.audio_root().ok())
+    }
+
+    /// 「浏览…」：弹原生目录选择器，选中后写入输入框与配置。
+    fn on_browse_audio_dir(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(dir) = paths.into_iter().next()
+            {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let s = dir.to_string_lossy().to_string();
+                    this.audio_dir.update(cx, |st, cx| st.set_value(s.clone(), window, cx));
+                    this.update_config(cx, |c| c.storage.audio_dir = s);
+                    this.audio_usage_bytes =
+                        this.current_audio_root(cx).map(|r| dir_size(&r)).unwrap_or(0);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 「打开」：在系统文件管理器中打开音频根目录（不存在则先创建）。
+    fn on_open_audio_dir(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // 以输入框当前值为准（可能尚未落盘）。
+        let dir = {
+            let v = self.audio_dir.read(cx).value().to_string();
+            if v.trim().is_empty() {
+                crate::config::StorageConfig::default_audio_root().ok()
+            } else {
+                Some(std::path::PathBuf::from(v.trim()))
+            }
+        };
+        let Some(dir) = dir else { return };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!("创建音频目录失败: {e:#}");
+            window.push_notification("无法打开目录", cx);
+            return;
+        }
+        cx.open_with_system(&dir);
+    }
+
+    /// 「立即清理过期音频」：按 audio_retention_days 删除过期片段及文件，刷新占用。
+    fn on_clean_audio(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_inputs_to_config(cx);
+        let days = cx
+            .try_global::<GlobalConfig>()
+            .map(|g| g.0.storage.audio_retention_days)
+            .unwrap_or(0);
+        let removed = match cx.try_global::<crate::history::GlobalHistory>() {
+            Some(g) => match g.0.purge_audio_older_than(days) {
+                Ok(paths) => {
+                    for p in &paths {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    paths.len()
+                }
+                Err(e) => {
+                    tracing::warn!("清理过期音频失败: {e:#}");
+                    0
+                }
+            },
+            None => 0,
+        };
+        self.audio_usage_bytes = self.current_audio_root(cx).map(|r| dir_size(&r)).unwrap_or(0);
+        window.push_notification(format!("已清理 {removed} 个过期录音"), cx);
+        cx.notify();
     }
 
     /// 导出全部历史记录为 JSON（2026-06-16 从主界面标题栏迁入「数据」区）。
@@ -572,8 +676,66 @@ impl Render for SettingsView {
             )
             // ── 数据 ──
             .child(self.section_title("settings.section.data", cx))
+            .child(self.labeled(
+                "settings.save_audio",
+                Switch::new("save-audio")
+                    .checked(cfg.storage.save_audio)
+                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                        let v = *checked;
+                        this.update_config(cx, |c| c.storage.save_audio = v);
+                        cx.notify();
+                    })),
+            ))
+            .child(self.field_label("settings.audio_dir", cx))
             .child(
-                div().pt_2().child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.audio_dir)))
+                    .child(
+                        Button::new("audio-browse")
+                            .outline()
+                            .label(tr("settings.browse"))
+                            .on_click(cx.listener(Self::on_browse_audio_dir)),
+                    )
+                    .child(
+                        Button::new("audio-open")
+                            .outline()
+                            .label(tr("settings.open_folder"))
+                            .on_click(cx.listener(Self::on_open_audio_dir)),
+                    ),
+            )
+            .child(
+                div()
+                    .pt_0p5()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr("settings.audio_dir_hint")),
+            )
+            .child(self.labeled(
+                "settings.audio_retention",
+                div().w(px(120.)).child(Input::new(&self.audio_retention)),
+            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_center()
+                    .py_1()
+                    .child(div().text_sm().child(format!(
+                        "{} {}",
+                        tr("settings.audio_usage"),
+                        human_size(self.audio_usage_bytes)
+                    )))
+                    .child(
+                        Button::new("audio-clean")
+                            .outline()
+                            .label(tr("settings.clean_audio"))
+                            .on_click(cx.listener(Self::on_clean_audio)),
+                    ),
+            )
+            .child(
+                div().pt_3().child(
                     Button::new("export-history")
                         .outline()
                         .label(tr("settings.export_history"))
@@ -736,5 +898,36 @@ impl SettingsView {
             .text_sm()
             .child(div().text_color(cx.theme().muted_foreground).child(tr(label_key)))
             .child(div().child(value.to_string()))
+    }
+}
+
+/// 递归统计目录内文件总字节数（用于占用显示；忽略错误项）。
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    for e in entries.flatten() {
+        match e.file_type() {
+            Ok(ft) if ft.is_dir() => total += dir_size(&e.path()),
+            Ok(ft) if ft.is_file() => total += e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => {}
+        }
+    }
+    total
+}
+
+/// 人类可读的字节数（B/KB/MB/GB）。
+fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.1} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else {
+        format!("{:.2} GB", b / (KB * KB * KB))
     }
 }

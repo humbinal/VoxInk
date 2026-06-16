@@ -1936,15 +1936,18 @@ impl RecordGlyph {
 
 /// 电平（0..1 RMS 幅度）→ 波形竖条高度（px）。
 ///
-/// 用 **dBFS 对数映射**（-60dB..0dB → 3..30px）：人耳对响度近似对数；配合 RMS（非峰值）后，
-/// 普通说话（RMS 约 -25dB）落在约 60%，偏大（约 -10dB）约 83%，只有特别大（逼近 0dBFS）才满格，
-/// 不会"稍大一点就满"。
+/// dBFS 对数映射 + **gamma 压缩**，让"满格"只在声音特别大（逼近 0dBFS）时出现：
+/// 先把 [-50dB, 0dB] 线性归一化，再做 `^GAMMA`（GAMMA>1 把中段整体压低）。
+/// 经验值：普通说话(RMS≈-20dB)≈0.33、偏大(≈-10dB)≈0.64、很大(≈-6dB)≈0.76、削顶(0dB)=1.0。
+/// 想更灵敏（条更高）→ 调小 GAMMA 或抬高 MIN_DB；想更难满 → 调大 GAMMA。
 fn level_bar_height(level: f32) -> f32 {
-    const MIN_DB: f32 = -60.0;
+    const MIN_DB: f32 = -50.0;
+    const GAMMA: f32 = 2.2;
     let norm = if level <= 1e-5 {
         0.0
     } else {
-        ((20.0 * level.log10() - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
+        let lin = ((20.0 * level.log10() - MIN_DB) / -MIN_DB).clamp(0.0, 1.0);
+        lin.powf(GAMMA)
     };
     3.0 + norm * 27.0
 }

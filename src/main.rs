@@ -6,6 +6,7 @@
 
 mod app;
 mod asr;
+mod assets;
 mod audio;
 mod autolaunch;
 mod config;
@@ -24,8 +25,8 @@ use config::VoxInkConfig;
 use gpui::{
     prelude::*, px, size, App, Bounds, Entity, TitlebarOptions, WindowBounds, WindowOptions,
 };
+use assets::VoxInkAssets;
 use gpui_component::Root;
-use gpui_component_assets::Assets;
 use tracing_subscriber::EnvFilter;
 
 // 多语言词典（编译期嵌入 crate 根 `locales/`），缺省回退简体中文（M11 任务 11.3）。
@@ -75,7 +76,7 @@ fn main() -> Result<()> {
         tracing::warn!("同步开机自启状态失败: {e:#}");
     }
 
-    let app = gpui_platform::application().with_assets(Assets);
+    let app = gpui_platform::application().with_assets(VoxInkAssets);
     app.run(move |cx| {
         // 初始化 gpui-component（主题、输入、菜单等子系统）。
         gpui_component::init(cx);

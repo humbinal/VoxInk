@@ -11,16 +11,18 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    div, ease_in_out, prelude::*, px, rgb, white, Animation, AnimationExt, AnyElement, App,
-    ClickEvent, Context, Entity, Focusable, IntoElement, ParentElement, Render, SharedString,
+    div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement, App,
+    ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, ParentElement, Render, SharedString,
     Styled, Subscription, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
-    v_flex, ActiveTheme, Root, WindowExt,
+    v_flex, ActiveTheme, Icon, IconName, Root, Sizable, WindowExt,
 };
+
+use crate::theme::{brand_tint, BRAND, DANGER, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDING};
 
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
@@ -664,11 +666,11 @@ impl VoxInk {
     }
 
     /// 当前状态的文字与指示色（§6.3）。
-    fn status(&self) -> (SharedString, gpui::Rgba) {
+    fn status(&self) -> (SharedString, Hsla) {
         match self.state.recording_state {
-            RecordingState::Idle => (tr("status.idle").into(), rgb(0x27AE60)),
-            RecordingState::Recording => (tr("status.recording").into(), rgb(0xE74C3C)),
-            RecordingState::Processing => (tr("status.processing").into(), rgb(0xF39C12)),
+            RecordingState::Idle => (tr("status.idle").into(), STATUS_IDLE),
+            RecordingState::Recording => (tr("status.recording").into(), STATUS_RECORDING),
+            RecordingState::Processing => (tr("status.processing").into(), STATUS_PROCESSING),
         }
     }
 
@@ -822,33 +824,57 @@ impl VoxInk {
             .flex_shrink_0()
             .bg(cx.theme().sidebar)
             .border_r_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().sidebar_border)
             .child(
-                // 标题 + 设置
+                // 品牌标识 + 导出/设置
                 h_flex()
                     .justify_between()
                     .items_center()
                     .px_3()
-                    .py_3()
+                    .pt_3()
+                    .pb_2p5()
                     .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("🎙 VoxInk"),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            // 品牌圆形徽标。
+                            .child(
+                                div()
+                                    .size(px(26.))
+                                    .rounded_full()
+                                    .bg(BRAND)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        Icon::empty()
+                                            .path("icons/mic.svg")
+                                            .size(px(15.))
+                                            .text_color(white()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("VoxInk"),
+                            ),
                     )
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap_0p5()
                             .child(
                                 Button::new("export")
                                     .ghost()
-                                    .label("⬇")
+                                    .small()
+                                    .icon(IconName::ArrowDown)
                                     .on_click(cx.listener(Self::on_export)),
                             )
                             .child(
                                 Button::new("settings")
                                     .ghost()
-                                    .label("⚙")
+                                    .small()
+                                    .icon(IconName::Settings)
                                     .on_click(cx.listener(Self::on_open_settings)),
                             ),
                     ),
@@ -858,27 +884,30 @@ impl VoxInk {
             .child(self.render_record_list(cx))
     }
 
-    /// 「＋ 新建」按钮；录制中禁用（变灰、不可点）。
+    /// 「＋ 新建」按钮——主色浅填充 + 主色图标文字；录制中禁用（变灰、不可点）。
     fn render_new_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let is_idle = self.is_idle();
-        let mut btn = div()
+        let mut btn = h_flex()
             .id("new-record")
-            .flex()
             .items_center()
             .justify_center()
+            .gap_1p5()
             .w_full()
-            .h(px(34.))
+            .h(px(36.))
             .rounded(px(8.))
-            .bg(cx.theme().accent)
-            .text_color(cx.theme().accent_foreground)
+            .bg(brand_tint(cx))
+            .text_color(BRAND)
+            .text_sm()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(Icon::new(IconName::Plus).size(px(15.)).text_color(BRAND))
             .child(tr("sidebar.new"));
         if is_idle {
             btn = btn
                 .cursor_pointer()
-                .hover(|s| s.opacity(0.9))
+                .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(Self::on_new_record));
         } else {
-            btn = btn.opacity(0.5);
+            btn = btn.opacity(0.45);
         }
         btn.into_any_element()
     }
@@ -954,10 +983,17 @@ impl VoxInk {
                     .child(div().w_full().text_sm().truncate().child(title))
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap_1p5()
+                            .items_center()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(mode_icon(&rec.mode))
+                            // 模式以小圆点区分：实时=主色，离线=中性。
+                            .child(
+                                div()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(mode_dot(&rec.mode, cx)),
+                            )
                             .child(time_label(&rec.created_at)),
                     ),
             );
@@ -983,19 +1019,22 @@ impl VoxInk {
         if is_current {
             row = row.bg(cx.theme().list_active);
         } else if is_idle {
-            row = row.hover(|s| s.bg(cx.theme().muted));
+            row = row.hover(|s| s.bg(cx.theme().list_hover));
         }
 
         if is_idle {
             row = row.child(
                 div()
                     .id(elem_id("recdel", &rec.id))
-                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(22.))
+                    .rounded(px(5.))
                     .cursor_pointer()
-                    .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .hover(|s| s.text_color(rgb(0xE74C3C)))
-                    .child("✕")
+                    .hover(|s| s.text_color(DANGER))
+                    .child(Icon::new(IconName::Close).size(px(13.)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.delete_record(del_id.clone(), window, cx)
                     })),
@@ -1008,23 +1047,34 @@ impl VoxInk {
 
     /// 录音按钮：按状态变色/变字；Recording 时叠加脉冲呼吸动画；Processing 不可点击。
     fn render_record_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (bg, label, clickable) = match self.state.recording_state {
-            RecordingState::Idle => (rgb(0x27AE60), tr("record.start"), true),
-            RecordingState::Recording => (rgb(0xE74C3C), tr("record.stop"), true),
-            RecordingState::Processing => (rgb(0xF39C12), tr("record.processing"), false),
-        };
+        let (bg, label, clickable, glyph): (Hsla, _, bool, RecordGlyph) =
+            match self.state.recording_state {
+                RecordingState::Idle => (BRAND, tr("record.start"), true, RecordGlyph::Dot),
+                RecordingState::Recording => {
+                    (STATUS_RECORDING, tr("record.stop"), true, RecordGlyph::Square)
+                }
+                RecordingState::Processing => (
+                    STATUS_PROCESSING,
+                    tr("record.processing"),
+                    false,
+                    RecordGlyph::None,
+                ),
+            };
 
-        let mut button = div()
+        let mut button = h_flex()
             .id("record-button")
-            .flex()
             .items_center()
             .justify_center()
+            .gap_2()
             .w_full()
-            .h(px(48.))
-            .rounded(px(8.))
+            .h(px(46.))
+            .rounded(px(10.))
             .bg(bg)
             .text_color(white())
-            .text_lg()
+            .text_base()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .shadow_sm()
+            .when_some(glyph.element(), |this, g| this.child(g))
             .child(label);
 
         if clickable {
@@ -1040,13 +1090,13 @@ impl VoxInk {
             button
                 .with_animation(
                     "record-pulse",
-                    Animation::new(Duration::from_millis(1200))
+                    Animation::new(Duration::from_millis(1400))
                         .repeat()
                         .with_easing(ease_in_out),
                     |this, delta| {
                         // 三角波 0→1→0，营造脉冲呼吸感。
                         let t = 1.0 - (2.0 * delta - 1.0).abs();
-                        this.opacity(0.6 + 0.4 * t)
+                        this.opacity(0.78 + 0.22 * t)
                     },
                 )
                 .into_any_element()
@@ -1061,9 +1111,10 @@ impl VoxInk {
 
         v_flex()
             .w_full()
-            .gap_3()
+            .gap_2p5()
             .px_4()
-            .py_4()
+            .pt_4()
+            .pb_3()
             .items_center()
             .child(self.render_record_button(cx))
             // 转录模式切换：实时 / 离线
@@ -1089,43 +1140,59 @@ impl VoxInk {
                             })),
                     ),
             )
-            // 状态指示：● 状态  MM:SS
+            // 状态指示胶囊：· 状态  MM:SS
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_1p5()
                     .items_center()
+                    .px_2p5()
+                    .py_1()
+                    .rounded_full()
+                    .bg(cx.theme().muted)
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(div().text_color(status_color).child("●"))
+                    .child(div().size(px(7.)).rounded_full().bg(status_color))
                     .child(status_text)
-                    .child(self.duration_label()),
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("Consolas")
+                            .child(self.duration_label()),
+                    ),
             )
             // 实时识别未稳定文本（pending）：浅色显示以区分稳定结果（§4.2.1）。
             .when(!self.state.pending_text.is_empty(), |this| {
                 this.child(
                     div()
                         .w_full()
-                        .px_2()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(8.))
+                        .bg(brand_tint(cx))
                         .text_sm()
+                        .italic()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("✍ {}", self.state.pending_text)),
+                        .child(self.state.pending_text.clone()),
                 )
             })
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex_1().w_full().px_4().py_2().child(
+        div().flex_1().w_full().px_4().pb_1().child(
             div()
                 .size_full()
+                .p_1()
+                .bg(cx.theme().background)
                 .border_1()
                 .border_color(cx.theme().border)
-                .rounded(px(6.))
+                .rounded(px(10.))
                 .child(Input::new(&self.editor).h_full().bordered(false)),
         )
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let char_count = self.editor.read(cx).value().chars().count();
+        let copied = self.copied;
 
         h_flex()
             .justify_between()
@@ -1133,15 +1200,19 @@ impl VoxInk {
             .w_full()
             .px_4()
             .py_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
             .text_sm()
             .text_color(cx.theme().muted_foreground)
-            .child(format!("{}: {char_count}", tr("footer.words")))
+            .child(format!("{} {char_count}", tr("footer.words")))
             .child(
                 Button::new("copy")
                     .primary()
-                    .label(if self.copied {
+                    .when(copied, |b| b.success())
+                    .icon(if copied {
+                        IconName::Check
+                    } else {
+                        IconName::Copy
+                    })
+                    .label(if copied {
                         tr("footer.copied")
                     } else {
                         tr("footer.copy")
@@ -1284,12 +1355,42 @@ fn elem_id(prefix: &str, id: &str) -> SharedString {
     SharedString::from(format!("{prefix}-{id}"))
 }
 
-/// 模式图标。
-fn mode_icon(mode: &str) -> &'static str {
+/// 录音按钮内的状态字形：录制点（实心圆）/ 停止块（圆角方块）/ 无。
+enum RecordGlyph {
+    Dot,
+    Square,
+    None,
+}
+
+impl RecordGlyph {
+    fn element(&self) -> Option<AnyElement> {
+        match self {
+            // 麦克风图标，呼应「开始说话」。
+            RecordGlyph::Dot => Some(
+                Icon::empty()
+                    .path("icons/mic.svg")
+                    .size(px(17.))
+                    .text_color(white())
+                    .into_any_element(),
+            ),
+            // 经典「停止」圆角方块。
+            RecordGlyph::Square => Some(
+                div()
+                    .size(px(11.))
+                    .rounded(px(2.5))
+                    .bg(white())
+                    .into_any_element(),
+            ),
+            RecordGlyph::None => None,
+        }
+    }
+}
+
+/// 模式指示点颜色：实时=主色，离线/其它=中性。
+fn mode_dot(mode: &str, cx: &App) -> Hsla {
     match mode {
-        "streaming" => "🎤",
-        "offline" => "📄",
-        _ => "•",
+        "streaming" => BRAND,
+        _ => cx.theme().muted_foreground,
     }
 }
 

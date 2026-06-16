@@ -29,10 +29,10 @@ mod tests {
     #[test]
     fn translations_resolve_per_locale() {
         apply_locale("zh-CN");
-        assert_eq!(tr("record.start"), "🎤 开始录音");
+        assert_eq!(tr("record.start"), "开始录音");
         assert_eq!(tr("settings.title"), "设置");
         apply_locale("en");
-        assert_eq!(tr("record.start"), "🎤 Start");
+        assert_eq!(tr("record.start"), "Start recording");
         assert_eq!(tr("settings.title"), "Settings");
         apply_locale("zh-CN"); // 复位，避免影响其它用例
     }

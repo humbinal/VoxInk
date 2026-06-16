@@ -21,7 +21,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
-    v_flex, ActiveTheme, Icon, IconName, Root, Sizable, WindowExt,
+    v_flex, ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt,
 };
 
 use crate::theme::{brand_tint, BRAND, DANGER, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDING};
@@ -1325,13 +1325,13 @@ impl VoxInk {
             .id("record-button")
             .items_center()
             .justify_center()
-            .gap_2()
-            .w(px(148.))
-            .h(px(44.))
-            .rounded(px(10.))
+            .gap_1p5()
+            .w(px(140.))
+            .h(px(34.))
+            .rounded(px(8.))
             .bg(bg)
             .text_color(white())
-            .text_base()
+            .text_sm()
             .font_weight(gpui::FontWeight::MEDIUM)
             .shadow_sm()
             .when_some(glyph.element(), |this, g| this.child(g))
@@ -1374,29 +1374,25 @@ impl VoxInk {
             .px_4()
             .pt_4()
             .pb_3()
-            // 单行工具条：录音按钮 + 中部（波形/模式切换）+ 状态胶囊。
+            // 单行工具条：模式切换 + 录音按钮 + 状态胶囊 + 实时波形。
             .child(
                 h_flex()
                     .w_full()
                     .items_center()
                     .gap_3()
+                    .child(self.render_mode_toggle(cx))
                     .child(self.render_record_button(cx))
+                    .child(self.render_status(cx))
                     .child(
-                        // 中部弹性区：录音时显示实时波形，否则显示模式切换。
+                        // 右侧弹性区：录音时显示实时波形，空闲时留白。
                         div()
                             .flex_1()
-                            .h(px(44.))
+                            .h_full()
                             .flex()
                             .items_center()
-                            .justify_center()
                             .overflow_hidden()
-                            .child(if recording {
-                                self.render_waveform(cx).into_any_element()
-                            } else {
-                                self.render_mode_toggle(cx).into_any_element()
-                            }),
-                    )
-                    .child(self.render_status(cx)),
+                            .when(recording, |d| d.child(self.render_waveform(cx))),
+                    ),
             )
             // 实时识别未稳定文本（pending）：浅色显示以区分稳定结果（§4.2.1）。
             .when(!self.state.pending_text.is_empty(), |this| {
@@ -1415,15 +1411,18 @@ impl VoxInk {
             })
     }
 
-    /// 转录模式切换（实时 / 离线）。
+    /// 转录模式切换（实时 / 离线）。录音中禁用但仍显示当前模式。
     fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
+        let disabled = self.state.recording_state != RecordingState::Idle;
         h_flex()
+            .flex_shrink_0()
             .gap_2()
             .child(
                 Button::new("mode-streaming")
                     .when(is_streaming, |b| b.primary())
                     .when(!is_streaming, |b| b.outline())
+                    .disabled(disabled)
                     .label(tr("mode.streaming"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.on_select_mode(TranscriptionMode::Streaming, cx)
@@ -1433,6 +1432,7 @@ impl VoxInk {
                 Button::new("mode-offline")
                     .when(!is_streaming, |b| b.primary())
                     .when(is_streaming, |b| b.outline())
+                    .disabled(disabled)
                     .label(tr("mode.offline"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.on_select_mode(TranscriptionMode::Offline, cx)
@@ -1469,7 +1469,7 @@ impl VoxInk {
             .w_full()
             .h_full()
             .items_center()
-            .justify_center()
+            .justify_start()
             .gap_0p5();
 
         if self.levels.iter().all(|&l| l < 0.001) {
@@ -1488,7 +1488,7 @@ impl VoxInk {
             let h = 3.0 + norm * 27.0;
             row = row.child(
                 div()
-                    .w(px(3.))
+                    .w(px(2.))
                     .h(px(h))
                     .rounded_full()
                     .bg(STATUS_RECORDING),
@@ -1920,15 +1920,15 @@ impl RecordGlyph {
             RecordGlyph::Dot => Some(
                 Icon::empty()
                     .path("icons/mic.svg")
-                    .size(px(17.))
+                    .size(px(15.))
                     .text_color(white())
                     .into_any_element(),
             ),
             // 经典「停止」圆角方块。
             RecordGlyph::Square => Some(
                 div()
-                    .size(px(11.))
-                    .rounded(px(2.5))
+                    .size(px(10.))
+                    .rounded(px(2.))
                     .bg(white())
                     .into_any_element(),
             ),

@@ -15,7 +15,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputState},
     switch::Switch,
-    v_flex, ActiveTheme, WindowExt,
+    v_flex, ActiveTheme, Sizable, WindowExt,
 };
 
 use crate::app::{friendly_asr_error, runtime_asr_config, GlobalConfig, GlobalTokioHandle};
@@ -39,6 +39,29 @@ enum Dropdown {
     Offline,
 }
 
+/// 设置分类标签（左侧栏）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Asr,
+    Recording,
+    General,
+    Shortcuts,
+    Data,
+    About,
+}
+
+impl SettingsTab {
+    /// 左侧栏顺序与对应标题 locale key。
+    const ALL: [(SettingsTab, &'static str); 6] = [
+        (SettingsTab::Asr, "settings.section.asr"),
+        (SettingsTab::Recording, "settings.section.recording"),
+        (SettingsTab::General, "settings.section.general"),
+        (SettingsTab::Shortcuts, "settings.section.shortcuts"),
+        (SettingsTab::Data, "settings.section.data"),
+        (SettingsTab::About, "settings.section.about"),
+    ];
+}
+
 pub struct SettingsView {
     max_secs: Entity<InputState>,
     // 实时后端配置
@@ -59,6 +82,8 @@ pub struct SettingsView {
     text_retention: Entity<InputState>,
     /// 音频根目录当前占用字节数（打开设置/清理后刷新）。
     audio_usage_bytes: u64,
+    /// 当前选中的分类标签。
+    active_tab: SettingsTab,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -85,6 +110,7 @@ impl SettingsView {
             audio_retention: input(window, cx),
             text_retention: input(window, cx),
             audio_usage_bytes: 0,
+            active_tab: SettingsTab::Asr,
         }
     }
 
@@ -389,14 +415,47 @@ impl SettingsView {
 
     // ───────────────────────────── 渲染辅助 ─────────────────────────────
 
-    fn section_title(&self, key: &str, cx: &Context<Self>) -> impl IntoElement {
-        div()
-            .pt_3()
-            .pb_1()
-            .text_sm()
-            .font_weight(gpui::FontWeight::BOLD)
-            .text_color(cx.theme().muted_foreground)
-            .child(tr(key))
+    /// 左侧分类标签栏（竖排）。
+    fn render_tab_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut rail = v_flex()
+            .w(px(132.))
+            .flex_shrink_0()
+            .h_full()
+            .gap_0p5()
+            .px_2()
+            .py_2()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar);
+        for (tab, key) in SettingsTab::ALL {
+            let active = self.active_tab == tab;
+            let mut item = div()
+                .id(gpui::SharedString::from(format!("settings-tab-{key}")))
+                .w_full()
+                .px_3()
+                .py_1p5()
+                .rounded(px(6.))
+                .text_sm()
+                .cursor_pointer()
+                .child(tr(key))
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    this.active_tab = tab;
+                    this.open_dropdown = Dropdown::None;
+                    cx.notify();
+                }));
+            if active {
+                item = item
+                    .bg(cx.theme().list_active)
+                    .text_color(cx.theme().foreground)
+                    .font_weight(gpui::FontWeight::MEDIUM);
+            } else {
+                item = item
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().list_hover));
+            }
+            rail = rail.child(item);
+        }
+        rail
     }
 
     fn field_label(&self, key: &str, cx: &Context<Self>) -> impl IntoElement {
@@ -530,13 +589,15 @@ impl Render for SettingsView {
         let body = v_flex()
             .id("settings-body")
             .flex_1()
+            .min_h_0()
             .w_full()
             .gap_1()
             .px_4()
             .pb_2()
+            .text_sm()
             .overflow_y_scroll()
-            // ── ASR：实时 ──
-            .child(self.section_title("settings.section.asr", cx))
+            // ── ASR ──
+            .when(self.active_tab == SettingsTab::Asr, |this| this
             .child(self.field_label("settings.streaming_backend", cx))
             .child(self.render_dropdown(
                 Dropdown::Streaming,
@@ -545,10 +606,10 @@ impl Render for SettingsView {
                 cx,
             ))
             .child(self.field_label("settings.api_key", cx))
-            .child(Input::new(&self.stream_api_key))
+            .child(Input::new(&self.stream_api_key).small())
             .child(self.api_key_env_hint(&cfg.asr.streaming_backend, cx))
             .child(self.field_label("settings.endpoint", cx))
-            .child(Input::new(&self.stream_endpoint))
+            .child(Input::new(&self.stream_endpoint).small())
             .child(
                 div().pt_2().child(
                     Button::new("test-stream")
@@ -577,10 +638,10 @@ impl Render for SettingsView {
             })
             .when(!off_shared, |this| {
                 this.child(self.field_label("settings.api_key", cx))
-                    .child(Input::new(&self.off_api_key))
+                    .child(Input::new(&self.off_api_key).small())
                     .child(self.api_key_env_hint(&cfg.asr.offline_backend, cx))
                     .child(self.field_label("settings.endpoint", cx))
-                    .child(Input::new(&self.off_endpoint))
+                    .child(Input::new(&self.off_endpoint).small())
                     // 大文件后端额外的 OSS 参数
                     .when(off_is_filetrans, |this| {
                         this.child(
@@ -591,13 +652,13 @@ impl Render for SettingsView {
                                 .child(tr("settings.oss_hint")),
                         )
                         .child(self.field_label("settings.oss_endpoint", cx))
-                        .child(Input::new(&self.off_oss_endpoint))
+                        .child(Input::new(&self.off_oss_endpoint).small())
                         .child(self.field_label("settings.oss_bucket", cx))
-                        .child(Input::new(&self.off_oss_bucket))
+                        .child(Input::new(&self.off_oss_bucket).small())
                         .child(self.field_label("settings.oss_ak_id", cx))
-                        .child(Input::new(&self.off_oss_ak_id))
+                        .child(Input::new(&self.off_oss_ak_id).small())
                         .child(self.field_label("settings.oss_ak_secret", cx))
-                        .child(Input::new(&self.off_oss_ak_secret))
+                        .child(Input::new(&self.off_oss_ak_secret).small())
                     })
             })
             .child(
@@ -607,9 +668,9 @@ impl Render for SettingsView {
                         .label(tr("settings.test"))
                         .on_click(cx.listener(|this, _, window, cx| this.on_test(false, window, cx))),
                 ),
-            )
+            ))
             // ── 录音 ──
-            .child(self.section_title("settings.section.recording", cx))
+            .when(self.active_tab == SettingsTab::Recording, |this| this
             .child(self.labeled("settings.default_mode", self.mode_choice(mode, cx)))
             .child(self.labeled(
                 "settings.auto_copy",
@@ -633,10 +694,10 @@ impl Render for SettingsView {
             ))
             .child(self.labeled(
                 "settings.max_seconds",
-                div().w(px(120.)).child(Input::new(&self.max_secs)),
-            ))
+                div().w(px(120.)).child(Input::new(&self.max_secs).small()),
+            )))
             // ── 通用 ──
-            .child(self.section_title("settings.section.general", cx))
+            .when(self.active_tab == SettingsTab::General, |this| this
             .child(self.labeled(
                 "settings.autostart",
                 Switch::new("autostart")
@@ -671,9 +732,9 @@ impl Render for SettingsView {
                     })),
             ))
             .child(self.labeled("settings.theme", self.theme_choice(&theme, cx)))
-            .child(self.labeled("settings.language", self.lang_choice(lang, cx)))
+            .child(self.labeled("settings.language", self.lang_choice(lang, cx))))
             // ── 快捷键 ──
-            .child(self.section_title("settings.section.shortcuts", cx))
+            .when(self.active_tab == SettingsTab::Shortcuts, |this| this
             .child(self.shortcut_row("shortcut.toggle_recording", &cfg.shortcuts.toggle_recording, cx))
             .child(self.shortcut_row("shortcut.toggle_window", &cfg.shortcuts.toggle_window, cx))
             .child(self.shortcut_row("shortcut.copy_paste", &cfg.shortcuts.copy_and_paste, cx))
@@ -683,9 +744,9 @@ impl Render for SettingsView {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(tr("settings.shortcuts_hint")),
-            )
+            ))
             // ── 数据 ──
-            .child(self.section_title("settings.section.data", cx))
+            .when(self.active_tab == SettingsTab::Data, |this| this
             .child(self.labeled(
                 "settings.save_audio",
                 Switch::new("save-audio")
@@ -701,7 +762,7 @@ impl Render for SettingsView {
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.audio_dir)))
+                    .child(div().flex_1().child(Input::new(&self.audio_dir).small()))
                     .child(
                         Button::new("audio-browse")
                             .outline()
@@ -724,11 +785,11 @@ impl Render for SettingsView {
             )
             .child(self.labeled(
                 "settings.text_retention",
-                div().w(px(120.)).child(Input::new(&self.text_retention)),
+                div().w(px(120.)).child(Input::new(&self.text_retention).small()),
             ))
             .child(self.labeled(
                 "settings.audio_retention",
-                div().w(px(120.)).child(Input::new(&self.audio_retention)),
+                div().w(px(120.)).child(Input::new(&self.audio_retention).small()),
             ))
             .child(
                 h_flex()
@@ -762,9 +823,9 @@ impl Render for SettingsView {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(tr("settings.export_history_hint")),
-            )
+            ))
             // ── 关于 ──
-            .child(self.section_title("settings.section.about", cx))
+            .when(self.active_tab == SettingsTab::About, |this| this
             .child(self.about_row("about.version", crate::diagnostics::VERSION, cx))
             .child(self.about_row("about.build", &crate::diagnostics::build_time_display(), cx))
             .child(self.about_row("about.commit", crate::diagnostics::GIT_HASH, cx))
@@ -775,7 +836,7 @@ impl Render for SettingsView {
                         .label(tr("about.export_diag"))
                         .on_click(cx.listener(Self::on_export_diag)),
                 ),
-            );
+            ));
 
         // 覆盖层：半透明遮罩 + 居中面板。`.occlude()` 拦截鼠标，防止穿透到主视图误触录音。
         div()
@@ -788,7 +849,7 @@ impl Render for SettingsView {
             .bg(rgba(0x00000099))
             .child(
                 v_flex()
-                    .w(px(560.))
+                    .w(px(600.))
                     .max_h(px(600.))
                     .bg(cx.theme().background)
                     .border_1()
@@ -805,7 +866,7 @@ impl Render for SettingsView {
                             .border_color(cx.theme().border)
                             .child(
                                 div()
-                                    .text_lg()
+                                    .text_base()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .child(tr("settings.title")),
                             )
@@ -816,7 +877,15 @@ impl Render for SettingsView {
                                     .on_click(cx.listener(Self::on_done)),
                             ),
                     )
-                    .child(body),
+                    .child(
+                        // 左侧标签栏 + 右侧内容区。
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .child(self.render_tab_rail(cx))
+                            .child(body),
+                    ),
             )
     }
 }

@@ -1080,6 +1080,11 @@ impl VoxInk {
 
     /// 打开设置面板覆盖层（M11）：用当前配置填充输入框后显示。
     fn on_open_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(window, cx);
+    }
+
+    /// 打开设置面板覆盖层（供主界面齿轮与系统托盘菜单调用）。
+    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings
             .update(cx, |panel, pcx| panel.load_from_config(window, pcx));
         self.show_settings = true;

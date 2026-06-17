@@ -110,7 +110,18 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                         });
                     });
                 } else if event.id == "settings" {
-                    tracing::info!("托盘菜单：设置（M11 实现）");
+                    // 设置是主窗口上的覆盖层：先把主窗口显示/置前，再打开覆盖层。
+                    // 用 AnyWindowHandle（`*window`）取 Window 而不租借 Root，避免与
+                    // 视图更新/通知产生双重租借（同 record 分支）。
+                    let any_window = *window;
+                    let _ = any_window.update(cx, |_, win, app| {
+                        if let Some(h) = window_hwnd(win) {
+                            show_window(h);
+                        }
+                        view.update(app, |view, vcx| {
+                            view.open_settings(win, vcx);
+                        });
+                    });
                 }
             }
         }

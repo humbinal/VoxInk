@@ -451,9 +451,9 @@ impl SettingsView {
                 .id(gpui::SharedString::from(format!("settings-tab-{key}")))
                 .w_full()
                 .px_3()
-                .py_1p5()
+                .py_1()
                 .rounded(px(6.))
-                .text_sm()
+                .text_size(px(13.))
                 .cursor_pointer()
                 .child(tr(key))
                 .on_click(cx.listener(move |this, _, _w, cx| {
@@ -504,7 +504,7 @@ impl SettingsView {
             .items_center()
             .py_1()
             .gap_3()
-            .child(div().text_sm().child(tr(label_key)))
+            .child(div().child(tr(label_key)))
             .child(control)
     }
 
@@ -531,8 +531,8 @@ impl SettingsView {
             div()
                 .id(gpui::SharedString::from(format!("{id_prefix}-toggle")))
                 .w_full()
-                .px_3()
-                .py_1p5()
+                .px_2p5()
+                .py_1()
                 .rounded(px(6.))
                 .border_1()
                 .border_color(cx.theme().border)
@@ -542,7 +542,12 @@ impl SettingsView {
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().muted))
                 .child(current_name)
-                .child(if is_open { "▲" } else { "▼" })
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if is_open { "▲" } else { "▼" }),
+                )
                 .on_click(cx.listener(move |this, _, _w, cx| {
                     this.open_dropdown = if this.open_dropdown == kind {
                         Dropdown::None
@@ -566,8 +571,8 @@ impl SettingsView {
                 let mut item = div()
                     .id(gpui::SharedString::from(format!("{id_prefix}-{}", b.id)))
                     .w_full()
-                    .px_3()
-                    .py_1p5()
+                    .px_2p5()
+                    .py_1()
                     .cursor_pointer()
                     .hover(|s| s.bg(cx.theme().muted))
                     .child(b.display_name.clone())
@@ -612,7 +617,7 @@ impl Render for SettingsView {
             .gap_1()
             .px_4()
             .py_2()
-            .text_sm()
+            .text_size(px(13.))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             // ── ASR ──
@@ -633,6 +638,7 @@ impl Render for SettingsView {
                 div().pt_2().child(
                     Button::new("test-stream")
                         .outline()
+                        .small()
                         .label(tr("settings.test"))
                         .on_click(cx.listener(|this, _, window, cx| this.on_test(true, window, cx))),
                 ),
@@ -684,6 +690,7 @@ impl Render for SettingsView {
                 div().pt_2().child(
                     Button::new("test-offline")
                         .outline()
+                        .small()
                         .label(tr("settings.test"))
                         .on_click(cx.listener(|this, _, window, cx| this.on_test(false, window, cx))),
                 ),
@@ -785,12 +792,14 @@ impl Render for SettingsView {
                     .child(
                         Button::new("audio-browse")
                             .outline()
+                            .small()
                             .label(tr("settings.browse"))
                             .on_click(cx.listener(Self::on_browse_audio_dir)),
                     )
                     .child(
                         Button::new("audio-open")
                             .outline()
+                            .small()
                             .label(tr("settings.open_folder"))
                             .on_click(cx.listener(Self::on_open_audio_dir)),
                     ),
@@ -816,7 +825,7 @@ impl Render for SettingsView {
                     .justify_between()
                     .items_center()
                     .py_1()
-                    .child(div().text_sm().child(format!(
+                    .child(div().child(format!(
                         "{} {}",
                         tr("settings.audio_usage"),
                         human_size(self.audio_usage_bytes)
@@ -824,6 +833,7 @@ impl Render for SettingsView {
                     .child(
                         Button::new("audio-clean")
                             .outline()
+                            .small()
                             .label(tr("settings.clean_audio"))
                             .on_click(cx.listener(Self::on_clean_audio)),
                     ),
@@ -832,6 +842,7 @@ impl Render for SettingsView {
                 div().pt_3().child(
                     Button::new("export-history")
                         .outline()
+                        .small()
                         .label(tr("settings.export_history"))
                         .on_click(cx.listener(Self::on_export_history)),
                 ),
@@ -852,6 +863,7 @@ impl Render for SettingsView {
                 div().pt_2().child(
                     Button::new("export-diag")
                         .outline()
+                        .small()
                         .label(tr("about.export_diag"))
                         .on_click(cx.listener(Self::on_export_diag)),
                 ),
@@ -954,6 +966,7 @@ impl SettingsView {
                 Button::new("mode-s")
                     .when(is_streaming, |b| b.primary())
                     .when(!is_streaming, |b| b.outline())
+                    .small()
                     .label(tr("mode.streaming"))
                     .on_click(cx.listener(|this, _, _w, cx| {
                         this.update_config(cx, |c| c.asr.default_mode = TranscriptionMode::Streaming);
@@ -964,6 +977,7 @@ impl SettingsView {
                 Button::new("mode-o")
                     .when(!is_streaming, |b| b.primary())
                     .when(is_streaming, |b| b.outline())
+                    .small()
                     .label(tr("mode.offline"))
                     .on_click(cx.listener(|this, _, _w, cx| {
                         this.update_config(cx, |c| c.asr.default_mode = TranscriptionMode::Offline);
@@ -979,6 +993,7 @@ impl SettingsView {
             Button::new(id)
                 .when(active, |b| b.primary())
                 .when(!active, |b| b.outline())
+                .small()
                 .label(tr(key))
                 .on_click(cx.listener(move |this, _, window, cx| this.set_theme(val, window, cx)))
         };
@@ -997,6 +1012,7 @@ impl SettingsView {
                 Button::new("lang-zh")
                     .when(zh, |b| b.primary())
                     .when(!zh, |b| b.outline())
+                    .small()
                     .label("中文")
                     .on_click(cx.listener(|this, _, window, cx| this.set_language("zh-CN", window, cx))),
             )
@@ -1004,6 +1020,7 @@ impl SettingsView {
                 Button::new("lang-en")
                     .when(!zh, |b| b.primary())
                     .when(zh, |b| b.outline())
+                    .small()
                     .label("English")
                     .on_click(cx.listener(|this, _, window, cx| this.set_language("en", window, cx))),
             )
@@ -1015,7 +1032,7 @@ impl SettingsView {
             .justify_between()
             .items_center()
             .py_1()
-            .child(div().text_sm().child(tr(label_key)))
+            .child(div().child(tr(label_key)))
             .child(
                 div()
                     .px_2()
@@ -1033,7 +1050,6 @@ impl SettingsView {
             .justify_between()
             .items_center()
             .py_0p5()
-            .text_sm()
             .child(div().text_color(cx.theme().muted_foreground).child(tr(label_key)))
             .child(div().child(value.to_string()))
     }

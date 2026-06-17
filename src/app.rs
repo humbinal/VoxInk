@@ -1144,16 +1144,24 @@ impl VoxInk {
                         div()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
                             .child("VoxInk"),
                     ),
             )
-            // 设置齿轮（可点击：不在拖拽区内）。
+            // 设置齿轮（可点击：不在拖拽区内）。与窗口按钮同色同尺寸，保证标题栏配色统一。
             .child(
-                Button::new("settings")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Settings)
-                    .on_click(cx.listener(Self::on_open_settings)),
+                div()
+                    .id("settings")
+                    .w(px(44.))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().muted).text_color(cx.theme().foreground))
+                    .on_click(cx.listener(Self::on_open_settings))
+                    .child(Icon::new(IconName::Settings).size(px(15.))),
             )
             // 自绘窗口控制按钮（标记 NC 区域，点击由系统处理 最小化/最大化/关闭）。
             .child(self.render_window_button("win-min", WindowControlArea::Min, IconName::WindowMinimize, false, cx))

@@ -1107,6 +1107,7 @@ impl VoxInk {
         };
 
         h_flex()
+            .relative()
             .h(px(34.))
             .w_full()
             .flex_shrink_0()
@@ -1114,7 +1115,7 @@ impl VoxInk {
             .bg(cx.theme().title_bar)
             .border_b_1()
             .border_color(cx.theme().title_bar_border)
-            // 拖拽区：品牌 + 状态（标记 Drag → HTCAPTION：拖动/双击最大化由系统处理）。
+            // 拖拽区：品牌（标记 Drag → HTCAPTION：拖动/双击最大化由系统处理）。
             .child(
                 h_flex()
                     .flex_1()
@@ -1125,48 +1126,26 @@ impl VoxInk {
                     .overflow_hidden()
                     .window_control_area(WindowControlArea::Drag)
                     .child(
-                        h_flex()
-                            .gap_2()
+                        div()
+                            .size(px(22.))
+                            .rounded_full()
+                            .bg(BRAND)
+                            .flex()
                             .items_center()
+                            .justify_center()
                             .child(
-                                div()
-                                    .size(px(22.))
-                                    .rounded_full()
-                                    .bg(BRAND)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        Icon::empty()
-                                            .path("icons/mic.svg")
-                                            .size(px(13.))
-                                            .text_color(white()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("VoxInk"),
+                                Icon::empty()
+                                    .path("icons/mic.svg")
+                                    .size(px(13.))
+                                    .text_color(white()),
                             ),
                     )
-                    // 状态胶囊：仅录音/处理时浮现，空闲保持极简。
-                    .when(active, |this| {
-                        this.child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .px_2p5()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(cx.theme().muted)
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(div().size(px(6.)).rounded_full().bg(status_color))
-                                .child(status_text)
-                                .child(div().font_family("Consolas").child(self.duration_label())),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("VoxInk"),
+                    ),
             )
             // 设置齿轮（可点击：不在拖拽区内）。
             .child(
@@ -1180,6 +1159,31 @@ impl VoxInk {
             .child(self.render_window_button("win-min", WindowControlArea::Min, IconName::WindowMinimize, false, cx))
             .child(self.render_window_button("win-max", WindowControlArea::Max, max_icon, false, cx))
             .child(self.render_window_button("win-close", WindowControlArea::Close, IconName::WindowClose, true, cx))
+            // 状态胶囊：仅录音/处理时浮现，绝对居中于整条标题栏（更优雅；纯展示、不挡拖拽与按钮）。
+            .when(active, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .px_2p5()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().muted)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(div().size(px(6.)).rounded_full().bg(status_color))
+                                .child(status_text)
+                                .child(div().font_family("Consolas").child(self.duration_label())),
+                        ),
+                )
+            })
     }
 
     /// 单个窗口控制按钮：固定宽、整高、居中图标、悬停底色（关闭按钮悬停红）。
@@ -1192,6 +1196,8 @@ impl VoxInk {
         is_close: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
+        // 悬停反馈：关闭键 → 红底白图标；最小化/最大化 → 浅底 + 深色图标（不可用白色，否则图标看不见）。
+        let hover_fg = if is_close { white() } else { cx.theme().foreground };
         let hover_bg = if is_close { DANGER } else { cx.theme().muted };
         div()
             .id(id)
@@ -1202,7 +1208,7 @@ impl VoxInk {
             .justify_center()
             .text_color(cx.theme().muted_foreground)
             .window_control_area(area)
-            .hover(|s| s.bg(hover_bg).text_color(white()))
+            .hover(|s| s.bg(hover_bg).text_color(hover_fg))
             .child(Icon::new(icon).size(px(14.)))
     }
 

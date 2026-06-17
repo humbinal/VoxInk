@@ -22,11 +22,9 @@ mod tray;
 use anyhow::Result;
 use app::{GlobalConfig, GlobalTokioHandle, VoxInk};
 use config::VoxInkConfig;
-use gpui::{
-    prelude::*, px, size, App, Bounds, Entity, TitlebarOptions, WindowBounds, WindowOptions,
-};
+use gpui::{prelude::*, px, size, App, Bounds, Entity, WindowBounds, WindowOptions};
 use assets::VoxInkAssets;
-use gpui_component::Root;
+use gpui_component::{Root, TitleBar};
 use tracing_subscriber::EnvFilter;
 
 // 多语言词典（编译期嵌入 crate 根 `locales/`），缺省回退简体中文（M11 任务 11.3）。
@@ -132,10 +130,13 @@ fn main() -> Result<()> {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
+                    // 自绘标题栏（无系统标题栏）：appears_transparent: true，配套 gpui_component::TitleBar。
+                    // 仍设置 title（不绘制，仅供任务栏/Alt-Tab 标识）。
+                    titlebar: Some(gpui::TitlebarOptions {
                         title: Some("VoxInk".into()),
-                        ..Default::default()
+                        ..TitleBar::title_bar_options()
                     }),
+                    window_min_size: Some(size(px(640.), px(420.))),
                     ..Default::default()
                 },
                 |window, cx| {

@@ -15,7 +15,7 @@ use chrono::{DateTime, Local};
 use gpui::{
     div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement, App,
     ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window,
+    Styled, Subscription, Window, WindowControlArea,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -1093,30 +1093,44 @@ impl VoxInk {
 
     // ───────────────────────────── 渲染：左栏 ─────────────────────────────
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .w(px(SIDEBAR_WIDTH))
-            .h_full()
+    /// 自绘标题栏（无系统标题栏）：左=可拖拽的品牌+状态区，右=设置齿轮 + 自绘最小化/最大化/关闭。
+    ///
+    /// 拖拽区与可点击控件必须是**兄弟**而非父子：gpui 把标了 `WindowControlArea::Drag` 的元素整片
+    /// 当成 HTCAPTION，其子元素的点击会被系统当成拖窗而吞掉。故齿轮/窗口按钮独立成兄弟节点。
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = !self.is_idle();
+        let (status_text, status_color) = self.status();
+        let max_icon = if window.is_maximized() {
+            IconName::WindowRestore
+        } else {
+            IconName::WindowMaximize
+        };
+
+        h_flex()
+            .h(px(34.))
+            .w_full()
             .flex_shrink_0()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
+            .items_center()
+            .bg(cx.theme().title_bar)
+            .border_b_1()
+            .border_color(cx.theme().title_bar_border)
+            // 拖拽区：品牌 + 状态（标记 Drag → HTCAPTION：拖动/双击最大化由系统处理）。
             .child(
-                // 品牌标识 + 导出/设置
                 h_flex()
-                    .justify_between()
+                    .flex_1()
+                    .h_full()
                     .items_center()
-                    .px_3()
-                    .pt_3()
-                    .pb_2p5()
+                    .gap_2()
+                    .pl_3()
+                    .overflow_hidden()
+                    .window_control_area(WindowControlArea::Drag)
                     .child(
                         h_flex()
                             .gap_2()
                             .items_center()
-                            // 品牌圆形徽标。
                             .child(
                                 div()
-                                    .size(px(26.))
+                                    .size(px(22.))
                                     .rounded_full()
                                     .bg(BRAND)
                                     .flex()
@@ -1125,26 +1139,82 @@ impl VoxInk {
                                     .child(
                                         Icon::empty()
                                             .path("icons/mic.svg")
-                                            .size(px(15.))
+                                            .size(px(13.))
                                             .text_color(white()),
                                     ),
                             )
                             .child(
                                 div()
-                                    .text_base()
+                                    .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("VoxInk"),
                             ),
                     )
-                    .child(
-                        Button::new("settings")
-                            .ghost()
-                            .small()
-                            .icon(IconName::Settings)
-                            .on_click(cx.listener(Self::on_open_settings)),
-                    ),
+                    // 状态胶囊：仅录音/处理时浮现，空闲保持极简。
+                    .when(active, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .px_2p5()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().muted)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(div().size(px(6.)).rounded_full().bg(status_color))
+                                .child(status_text)
+                                .child(div().font_family("Consolas").child(self.duration_label())),
+                        )
+                    }),
             )
-            .child(div().px_3().pb_2().child(self.render_new_button(cx)))
+            // 设置齿轮（可点击：不在拖拽区内）。
+            .child(
+                Button::new("settings")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Settings)
+                    .on_click(cx.listener(Self::on_open_settings)),
+            )
+            // 自绘窗口控制按钮（标记 NC 区域，点击由系统处理 最小化/最大化/关闭）。
+            .child(self.render_window_button("win-min", WindowControlArea::Min, IconName::WindowMinimize, false, cx))
+            .child(self.render_window_button("win-max", WindowControlArea::Max, max_icon, false, cx))
+            .child(self.render_window_button("win-close", WindowControlArea::Close, IconName::WindowClose, true, cx))
+    }
+
+    /// 单个窗口控制按钮：固定宽、整高、居中图标、悬停底色（关闭按钮悬停红）。
+    /// 标 `WindowControlArea` 后，系统命中测试返回对应 HT 码，点击由系统处理（无需 on_click）。
+    fn render_window_button(
+        &self,
+        id: &'static str,
+        area: WindowControlArea,
+        icon: IconName,
+        is_close: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let hover_bg = if is_close { DANGER } else { cx.theme().muted };
+        div()
+            .id(id)
+            .w(px(44.))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(cx.theme().muted_foreground)
+            .window_control_area(area)
+            .hover(|s| s.bg(hover_bg).text_color(white()))
+            .child(Icon::new(icon).size(px(14.)))
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .w(px(SIDEBAR_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .bg(cx.theme().sidebar)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(div().px_3().pt_3().pb_2().child(self.render_new_button(cx)))
             .child(div().px_3().pb_2().child(Input::new(&self.search)))
             .child(self.render_record_list(cx))
     }
@@ -1387,7 +1457,6 @@ impl VoxInk {
                     .gap_3()
                     .child(self.render_mode_toggle(cx))
                     .child(self.render_record_button(cx))
-                    .child(self.render_status(cx))
                     .child(
                         // 右侧弹性区：录音时显示实时波形，空闲时留白。
                         div()
@@ -1446,28 +1515,6 @@ impl VoxInk {
     }
 
     /// 状态胶囊：● 状态 + MM:SS。
-    fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (status_text, status_color) = self.status();
-        h_flex()
-            .gap_1p5()
-            .items_center()
-            .flex_shrink_0()
-            .px_2p5()
-            .py_1()
-            .rounded_full()
-            .bg(cx.theme().muted)
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(div().size(px(7.)).rounded_full().bg(status_color))
-            .child(status_text)
-            .child(
-                div()
-                    .text_xs()
-                    .font_family("Consolas")
-                    .child(self.duration_label()),
-            )
-    }
-
     /// 实时电平波形：把近期电平历史画成一排竖条（左旧右新，随声音起伏）。
     fn render_waveform(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = h_flex()
@@ -1697,24 +1744,40 @@ impl Render for VoxInk {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
-                h_flex()
+                v_flex()
                     .size_full()
-                    .child(self.render_sidebar(cx))
+                    // 自绘标题栏（常驻顶部，设置覆盖层之上仍可拖拽/最小化/关闭）。
+                    .child(self.render_title_bar(window, cx))
                     .child(
-                        // 右栏：录制控制 + 编辑区 + 底栏。
-                        v_flex()
+                        // 内容区：左侧栏 + 右栏；设置覆盖层只盖此区域。
+                        div()
+                            .relative()
                             .flex_1()
-                            .h_full()
-                            .child(self.render_controls(cx))
-                            .child(self.render_editor(cx))
-                            .when(self.show_segments, |this| {
-                                this.child(self.render_segments(cx))
-                            })
-                            .child(self.render_footer(cx)),
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(
+                                h_flex()
+                                    .size_full()
+                                    .child(self.render_sidebar(cx))
+                                    .child(
+                                        // 右栏：录制控制 + 编辑区 + 底栏。
+                                        v_flex()
+                                            .flex_1()
+                                            .h_full()
+                                            .child(self.render_controls(cx))
+                                            .child(self.render_editor(cx))
+                                            .when(self.show_segments, |this| {
+                                                this.child(self.render_segments(cx))
+                                            })
+                                            .child(self.render_footer(cx)),
+                                    ),
+                            )
+                            // 设置面板覆盖层（M11）：盖住内容区，标题栏仍可用。
+                            .when(self.show_settings, |this| {
+                                this.child(self.settings.clone())
+                            }),
                     ),
             )
-            // 设置面板覆盖层（M11）：显示时盖在主界面之上。
-            .when(self.show_settings, |this| this.child(self.settings.clone()))
             .children(notification_layer)
             .children(dialog_layer)
     }

@@ -8,12 +8,13 @@
 
 use gpui::{
     div, prelude::*, px, rgba, ClickEvent, Context, Entity, EventEmitter, IntoElement,
-    ParentElement, Render, Styled, Window,
+    ParentElement, Render, ScrollHandle, Styled, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
+    scroll::{Scrollbar, ScrollbarShow},
     switch::Switch,
     v_flex, ActiveTheme, IconName, Sizable, WindowExt,
 };
@@ -84,6 +85,8 @@ pub struct SettingsView {
     audio_usage_bytes: u64,
     /// 当前选中的分类标签。
     active_tab: SettingsTab,
+    /// 内容区滚动句柄（驱动可见滚动条）。
+    scroll: ScrollHandle,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -111,6 +114,7 @@ impl SettingsView {
             text_retention: input(window, cx),
             audio_usage_bytes: 0,
             active_tab: SettingsTab::Asr,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -602,16 +606,15 @@ impl Render for SettingsView {
 
         let body = v_flex()
             .id("settings-body")
-            .flex_1()
-            .h_full()
+            .size_full()
             .min_h_0()
             .justify_start()
-            .w_full()
             .gap_1()
             .px_4()
             .py_2()
             .text_sm()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             // ── ASR ──
             .when(self.active_tab == SettingsTab::Asr, |this| this
             .child(self.field_label("settings.streaming_backend", cx))
@@ -894,13 +897,27 @@ impl Render for SettingsView {
                             ),
                     )
                     .child(
-                        // 左侧标签栏 + 右侧内容区。
+                        // 左侧标签栏 + 右侧内容区（带常驻可见滚动条）。
                         h_flex()
                             .flex_1()
                             .min_h_0()
                             .w_full()
                             .child(self.render_tab_rail(cx))
-                            .child(body),
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .h_full()
+                                    .min_h_0()
+                                    .child(body)
+                                    .child(
+                                        div().absolute().inset_0().child(
+                                            Scrollbar::vertical(&self.scroll)
+                                                .id("settings-scrollbar")
+                                                .scrollbar_show(ScrollbarShow::Always),
+                                        ),
+                                    ),
+                            ),
                     )
                     // 可保存页面底部：保存按钮（右下角）。
                     .when(self.tab_is_editable(), |this| {

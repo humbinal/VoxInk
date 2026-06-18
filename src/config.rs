@@ -8,9 +8,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, bail, Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
@@ -285,7 +285,9 @@ impl VoxInkConfig {
                 match decrypt_api_key(value) {
                     Ok(plain) => *value = plain,
                     Err(e) => {
-                        tracing::warn!("后端 {id} 的 {field} 解密失败（可能更换了设备），已清空: {e:#}");
+                        tracing::warn!(
+                            "后端 {id} 的 {field} 解密失败（可能更换了设备），已清空: {e:#}"
+                        );
                         value.clear();
                     }
                 }
@@ -388,7 +390,9 @@ fn decrypt_api_key(blob_b64: &str) -> Result<String> {
         return Ok(String::new());
     }
 
-    let blob = BASE64.decode(blob_b64).context("API Key 密文 base64 解码失败")?;
+    let blob = BASE64
+        .decode(blob_b64)
+        .context("API Key 密文 base64 解码失败")?;
     if blob.len() < SALT_LEN + NONCE_LEN + TAG_LEN {
         bail!("API Key 密文长度不足");
     }

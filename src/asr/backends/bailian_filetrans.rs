@@ -194,7 +194,9 @@ impl BailianFiletransBackend {
             .map_err(map_reqwest_error)?;
         if !response.status().is_success() {
             let code = response.status().as_u16();
-            return Err(AsrError::NetworkError(format!("拉取转写结果失败 HTTP {code}")));
+            return Err(AsrError::NetworkError(format!(
+                "拉取转写结果失败 HTTP {code}"
+            )));
         }
         let value: Value = response
             .json()
@@ -245,7 +247,11 @@ async fn check_and_parse(response: reqwest::Response) -> Result<Value, AsrError>
     let status = response.status();
     match status.as_u16() {
         401 | 403 => return Err(AsrError::AuthError),
-        429 => return Err(AsrError::QuotaExceeded(response.text().await.unwrap_or_default())),
+        429 => {
+            return Err(AsrError::QuotaExceeded(
+                response.text().await.unwrap_or_default(),
+            ));
+        }
         code if !(200..300).contains(&code) => {
             let detail = response.text().await.unwrap_or_default();
             return Err(AsrError::NetworkError(format!("HTTP {code}: {detail}")));

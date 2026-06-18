@@ -6,32 +6,34 @@
 //! - 录制中禁用「新建」与切换记录；正文手动编辑防抖自动保存。
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement, App,
-    ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, WindowControlArea,
+    Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Entity, Focusable, Hsla,
+    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    WindowControlArea, div, ease_in_out, prelude::*, px, white,
 };
 use gpui_component::{
+    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
-    v_flex, ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt,
+    notification::Notification,
+    v_flex,
 };
 
-use crate::theme::{brand_tint, BRAND, DANGER, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDING};
+use crate::theme::{BRAND, DANGER, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDING, brand_tint};
 
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
-use crate::audio::{load_level, AudioError, LevelMeter, Recorder, StreamingCapture};
+use crate::audio::{AudioError, LevelMeter, Recorder, StreamingCapture, load_level};
 use crate::config::VoxInkConfig;
-use crate::history::db::{Record, Segment};
 use crate::history::GlobalHistory;
+use crate::history::db::{Record, Segment};
 use crate::i18n::tr;
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::state::{AppState, RecordingState, TranscriptionMode};
@@ -50,6 +52,44 @@ impl gpui::Global for GlobalTokioHandle {}
 const SIDEBAR_WIDTH: f32 = 230.0;
 /// 手动编辑后自动保存的防抖时延。
 const AUTOSAVE_DEBOUNCE_MS: u64 = 800;
+/// Toast 通知宽度（px）——比 gpui-component 默认 448 窄，避免遮挡正文；内容过长自动换行。
+const TOAST_WIDTH: f32 = 280.0;
+/// Toast 自动消失时延（ms）。gpui-component 内置 5s 偏长，这里关掉它改用自管定时器缩短。
+const TOAST_DURATION_MS: u64 = 2500;
+
+/// 给每条 toast 一个唯一 id（配合自管定时器按 key 精确移除）的类型标记。
+struct ToastKind;
+/// 全局自增计数器：每条 toast 取唯一 key，避免同 id 互相替换（让多条 toast 可堆叠）。
+static TOAST_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// 推送一条窄版 toast 通知：
+/// - 覆盖 gpui-component 默认宽度（[`TOAST_WIDTH`]），文本过长自动换行；
+/// - 字体比默认（text_sm）更小（text_xs）——故用 `content` 自绘文本而非 `message`；
+/// - 关掉库内置 5s 自动隐藏，改用更短的 [`TOAST_DURATION_MS`] 自管定时器移除。
+pub fn notify(window: &mut Window, message: impl Into<SharedString>, cx: &mut App) {
+    let text = message.into();
+    let key = TOAST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
+    window.push_notification(
+        Notification::new()
+            .id1::<ToastKind>(key)
+            .autohide(false)
+            .w(px(TOAST_WIDTH))
+            .content(move |_, _, _| div().text_xs().child(text.clone()).into_any_element()),
+        cx,
+    );
+
+    // 自管定时器：到点按 key 移除该条（库内置 autohide 时长不可配，故自行实现）。
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(TOAST_DURATION_MS))
+            .await;
+        let _ = cx.update_window(handle, |_, window, app| {
+            window.remove_notification1::<ToastKind>(key, app);
+        });
+    })
+    .detach();
+}
 
 /// VoxInk 主窗口视图。
 pub struct VoxInk {
@@ -179,14 +219,15 @@ impl VoxInk {
 
         // 设置面板覆盖层 + 关闭事件订阅（M11）。
         let settings = cx.new(|scx| SettingsView::new(window, scx));
-        let settings_sub = cx.subscribe(&settings, |this, _s, event: &SettingsEvent, cx| {
-            match event {
+        let settings_sub = cx.subscribe(
+            &settings,
+            |this, _s, event: &SettingsEvent, cx| match event {
                 SettingsEvent::Closed => {
                     this.show_settings = false;
                     cx.notify();
                 }
-            }
-        });
+            },
+        );
 
         Self {
             state,
@@ -241,7 +282,10 @@ impl VoxInk {
             if rec.text == text {
                 return; // 无改动，不写
             }
-            if let Err(e) = global.0.save_record(&id, &text, &rec.mode, rec.duration_secs) {
+            if let Err(e) = global
+                .0
+                .save_record(&id, &text, &rec.mode, rec.duration_secs)
+            {
                 tracing::error!("自动保存失败: {e:#}");
             }
         }
@@ -293,7 +337,7 @@ impl VoxInk {
     /// 新建一条空记录并切为当前（录制中禁用）。
     fn on_new_record(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_idle() {
-            window.push_notification("录制中，暂不能新建记录", cx);
+            notify(window, "录制中，暂不能新建记录", cx);
             return;
         }
         self.flush_editor_to_record(cx);
@@ -302,7 +346,7 @@ impl VoxInk {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("新建记录失败: {e:#}");
-                    window.push_notification("新建记录失败", cx);
+                    notify(window, "新建记录失败", cx);
                     return;
                 }
             },
@@ -322,7 +366,7 @@ impl VoxInk {
             return;
         }
         if !self.is_idle() {
-            window.push_notification("录制中，暂不能切换记录", cx);
+            notify(window, "录制中，暂不能切换记录", cx);
             return;
         }
         self.flush_editor_to_record(cx);
@@ -331,7 +375,8 @@ impl VoxInk {
             .and_then(|g| g.0.get_record(&id).ok().flatten());
         if let Some(rec) = rec {
             self.current_record_id = rec.id;
-            self.editor.update(cx, |s, cx| s.set_value(rec.text, window, cx));
+            self.editor
+                .update(cx, |s, cx| s.set_value(rec.text, window, cx));
         }
         self.refresh_records(cx);
         self.refresh_segments(cx);
@@ -340,7 +385,7 @@ impl VoxInk {
     /// 删除一条记录；若删的是当前记录，则切到最近一条（无则新建空记录）。
     fn delete_record(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_idle() {
-            window.push_notification("录制中，暂不能删除记录", cx);
+            notify(window, "录制中，暂不能删除记录", cx);
             return;
         }
         let deleting_current = id == self.current_record_id;
@@ -355,7 +400,7 @@ impl VoxInk {
             }
             if let Err(e) = global.0.delete_record(&id) {
                 tracing::error!("删除记录失败: {e:#}");
-                window.push_notification("删除记录失败", cx);
+                notify(window, "删除记录失败", cx);
                 return;
             }
             // 尝试删除当前根下该记录的（应已空的）目录。
@@ -381,7 +426,8 @@ impl VoxInk {
             match next {
                 Some(rec) => {
                     self.current_record_id = rec.id;
-                    self.editor.update(cx, |s, cx| s.set_value(rec.text, window, cx));
+                    self.editor
+                        .update(cx, |s, cx| s.set_value(rec.text, window, cx));
                 }
                 None => {
                     self.current_record_id = String::new();
@@ -450,7 +496,9 @@ impl VoxInk {
             }
             return;
         }
-        let size = std::fs::metadata(&active.path).map(|m| m.len()).unwrap_or(0);
+        let size = std::fs::metadata(&active.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         let same_record = active.record_id == self.current_record_id;
         if let Some(g) = cx.try_global::<GlobalHistory>()
             && let Err(e) = g.0.add_segment(
@@ -493,7 +541,7 @@ impl VoxInk {
         if p.exists() {
             cx.open_with_system(&p);
         } else {
-            window.push_notification("音频文件不存在（可能已被清理）", cx);
+            notify(window, "音频文件不存在（可能已被清理）", cx);
         }
     }
 
@@ -507,7 +555,7 @@ impl VoxInk {
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!("删除片段失败: {e:#}");
-                    window.push_notification("删除片段失败", cx);
+                    notify(window, "删除片段失败", cx);
                     return;
                 }
             }
@@ -516,17 +564,23 @@ impl VoxInk {
     }
 
     /// 重新转写某段音频：离线后端转写 → 追加到正文 + 回填该段文本 + 刷新。
-    fn retranscribe_segment(&mut self, seg_id: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn retranscribe_segment(
+        &mut self,
+        seg_id: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let wav = PathBuf::from(&path);
         if !wav.exists() {
-            window.push_notification("音频文件不存在（可能已被清理）", cx);
+            notify(window, "音频文件不存在（可能已被清理）", cx);
             return;
         }
         let asr_config = runtime_asr_config(cx, false);
         let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
             return;
         };
-        window.push_notification("重新转写中…", cx);
+        notify(window, "重新转写中…", cx);
 
         cx.spawn_in(window, async move |this, cx| {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -544,13 +598,13 @@ impl VoxInk {
                     }
                     this.refresh_records(cx);
                     this.refresh_segments(cx);
-                    window.push_notification("重新转写完成", cx);
+                    notify(window, "重新转写完成", cx);
                 }
                 Ok(Err(e)) => {
                     tracing::error!("重新转写失败: {e}");
-                    window.push_notification(friendly_asr_error(&e), cx);
+                    notify(window, friendly_asr_error(&e), cx);
                 }
-                Err(_) => window.push_notification("重新转写已取消", cx),
+                Err(_) => notify(window, "重新转写已取消", cx),
             });
         })
         .detach();
@@ -580,7 +634,7 @@ impl VoxInk {
                     AudioError::NoInputDevice => "未检测到麦克风，请检查录音设备",
                     _ => "无法开始录音，请重试",
                 };
-                window.push_notification(msg, cx);
+                notify(window, msg, cx);
             }
         }
     }
@@ -596,7 +650,8 @@ impl VoxInk {
         match recorder.stop() {
             Ok(outcome) => {
                 if auto {
-                    window.push_notification(
+                    notify(
+                        window,
                         format!(
                             "已达最长录音时长，已自动停止（{}s）",
                             outcome.duration.as_secs()
@@ -610,7 +665,7 @@ impl VoxInk {
             }
             Err(e) => {
                 tracing::error!("停止录音失败: {e}");
-                window.push_notification("停止录音时出错", cx);
+                notify(window, "停止录音时出错", cx);
                 self.state.recording_state = RecordingState::Idle;
                 self.state.recording_duration_secs = 0;
                 cx.notify();
@@ -628,7 +683,7 @@ impl VoxInk {
     ) {
         self.state.recording_state = RecordingState::Processing;
         cx.notify();
-        window.push_notification("正在识别…", cx);
+        notify(window, "正在识别…", cx);
 
         let asr_config = runtime_asr_config(cx, false);
         let Some(global_handle) = cx.try_global::<GlobalTokioHandle>() else {
@@ -658,17 +713,17 @@ impl VoxInk {
                         this.persist_after_recording("offline", duration_secs, cx);
                         // 录音片段落库（持久化）或清理临时文件。
                         this.finalize_segment(&text, duration_secs, cx);
-                        window.push_notification("转写完成", cx);
+                        notify(window, "转写完成", cx);
                     }
                     Ok(Err(e)) => {
                         tracing::error!("离线转写失败: {e}");
                         // 转写失败仍保留音频（可重转写）。
                         this.finalize_segment("", duration_secs, cx);
-                        window.push_notification(friendly_asr_error(&e), cx);
+                        notify(window, friendly_asr_error(&e), cx);
                     }
                     Err(_) => {
                         this.finalize_segment("", duration_secs, cx);
-                        window.push_notification("转写任务已取消", cx);
+                        notify(window, "转写任务已取消", cx);
                     }
                 }
                 cx.notify();
@@ -677,14 +732,14 @@ impl VoxInk {
         .detach();
     }
 
-
     // ───────────────────────────── 实时流式（M6）─────────────────────────────
 
     /// 开始实时流式识别：流式采集 + WS 后端 + 增量结果回 UI。
     fn start_streaming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = runtime_asr_config(cx, true);
         if config.api_key.trim().is_empty() {
-            window.push_notification(
+            notify(
+                window,
                 "未配置 API Key（设置环境变量 DASHSCOPE_API_KEY 或在设置中填写）",
                 cx,
             );
@@ -709,7 +764,7 @@ impl VoxInk {
                     AudioError::NoInputDevice => "未检测到麦克风，请检查录音设备",
                     _ => "无法开始录音，请重试",
                 };
-                window.push_notification(msg, cx);
+                notify(window, msg, cx);
                 return;
             }
         };
@@ -724,14 +779,18 @@ impl VoxInk {
         self.state.recording_duration_secs = 0;
         self.state.pending_text.clear();
         cx.notify();
-        window.push_notification("实时识别中…", cx);
+        notify(window, "实时识别中…", cx);
 
         // 用配置选定的流式后端（用户在设置中选择）；只依赖 trait + 注册表。
         let streaming_backend_id = config.backend_id.clone();
         handle.spawn(async move {
             let registry = BackendRegistry::with_builtins();
             let result = match registry.get(&streaming_backend_id) {
-                Some(backend) => backend.transcribe_streaming(&config, audio_rx, result_tx).await,
+                Some(backend) => {
+                    backend
+                        .transcribe_streaming(&config, audio_rx, result_tx)
+                        .await
+                }
                 None => Err(AsrError::InvalidConfig(format!(
                     "未找到后端: {streaming_backend_id}"
                 ))),
@@ -774,17 +833,17 @@ impl VoxInk {
                 self.state.recording_duration_secs = 0;
                 cx.notify();
                 if self.streaming_fallback {
-                    window.push_notification("实时识别失败，正在离线转写…", cx);
+                    notify(window, "实时识别失败，正在离线转写…", cx);
                     let duration_secs = outcome.duration.as_secs() as u32;
                     self.start_transcription(window, cx, outcome.path, duration_secs);
                 } else {
                     // 关闭音频通道触发后端 finish-task → 最终结果 → done（转 Idle）。
-                    window.push_notification("正在生成最终结果…", cx);
+                    notify(window, "正在生成最终结果…", cx);
                 }
             }
             Err(e) => {
                 tracing::error!("停止流式采集失败: {e}");
-                window.push_notification("停止录音时出错", cx);
+                notify(window, "停止录音时出错", cx);
                 self.finish_to_idle(cx);
             }
         }
@@ -833,7 +892,7 @@ impl VoxInk {
                 // 录音片段落库（持久化）或清理临时文件。
                 let seg_text = std::mem::take(&mut self.streaming_text);
                 self.finalize_segment(&seg_text, added, cx);
-                window.push_notification("识别完成", cx);
+                notify(window, "识别完成", cx);
                 self.finish_to_idle(cx);
             }
             Err(AsrError::AuthError) => {
@@ -843,7 +902,7 @@ impl VoxInk {
                 // 鉴权失败：保留已录音频（可重转写）。
                 let added = self.streaming_duration_secs;
                 self.finalize_segment("", added, cx);
-                window.push_notification("API Key 无效，请检查后重试", cx);
+                notify(window, "API Key 无效，请检查后重试", cx);
                 self.finish_to_idle(cx);
             }
             Err(e) => {
@@ -851,7 +910,7 @@ impl VoxInk {
                 self.streaming_fallback = true;
                 if self.streaming.is_some() {
                     // 用户仍在录音：保持录制，停止后用完整 WAV 离线转写（finalize 在转写完成后）。
-                    window.push_notification("实时识别失败，已切换离线，停止后将转写", cx);
+                    notify(window, "实时识别失败，已切换离线，停止后将转写", cx);
                     cx.notify();
                 } else {
                     // 已停止且无回退转写：保留音频片段。
@@ -877,9 +936,7 @@ impl VoxInk {
     fn spawn_timer(&self, window: &mut Window, cx: &mut Context<Self>, max_secs: u32) {
         cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_secs(1))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 let stop = this
                     .update_in(cx, |this, window, cx| {
                         if this.state.recording_state != RecordingState::Recording {
@@ -975,14 +1032,14 @@ impl VoxInk {
         let text = self.editor.read(cx).value().to_string();
         tracing::info!(chars = text.chars().count(), "复制并粘贴热键触发");
         if text.is_empty() {
-            window.push_notification("没有可复制的内容", cx);
+            notify(window, "没有可复制的内容", cx);
             return;
         }
         match copy_to_clipboard(&text) {
             Ok(()) => crate::hotkey::simulate_paste(),
             Err(e) => {
                 tracing::error!("复制失败: {e:#}");
-                window.push_notification("复制失败", cx);
+                notify(window, "复制失败", cx);
             }
         }
     }
@@ -1027,7 +1084,7 @@ impl VoxInk {
         tracing::info!(chars = text.chars().count(), "复制按钮被点击");
 
         if text.is_empty() {
-            window.push_notification("没有可复制的内容", cx);
+            notify(window, "没有可复制的内容", cx);
             return;
         }
 
@@ -1035,7 +1092,7 @@ impl VoxInk {
             Ok(()) => {
                 self.copied = true;
                 cx.notify();
-                window.push_notification("已复制到剪贴板", cx);
+                notify(window, "已复制到剪贴板", cx);
 
                 // 1.5 秒后复位"✓ 已复制"反馈。
                 cx.spawn(async move |this, cx| {
@@ -1051,7 +1108,7 @@ impl VoxInk {
             }
             Err(e) => {
                 tracing::error!("复制失败: {e:#}");
-                window.push_notification("复制失败", cx);
+                notify(window, "复制失败", cx);
             }
         }
     }
@@ -1059,7 +1116,7 @@ impl VoxInk {
     /// 在系统文件管理器中打开当前记录的录音目录（取最近一段已存在音频的所在目录）。
     fn on_open_recordings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.current_record_id.is_empty() {
-            window.push_notification("该记录暂无录音文件", cx);
+            notify(window, "该记录暂无录音文件", cx);
             return;
         }
         let paths = cx
@@ -1074,7 +1131,7 @@ impl VoxInk {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         match dir {
             Some(dir) => cx.open_with_system(&dir),
-            None => window.push_notification("该记录暂无录音文件", cx),
+            None => notify(window, "该记录暂无录音文件", cx),
         }
     }
 
@@ -1164,9 +1221,27 @@ impl VoxInk {
                     .child(Icon::new(IconName::Settings).size(px(15.))),
             )
             // 自绘窗口控制按钮（标记 NC 区域，点击由系统处理 最小化/最大化/关闭）。
-            .child(self.render_window_button("win-min", WindowControlArea::Min, IconName::WindowMinimize, false, cx))
-            .child(self.render_window_button("win-max", WindowControlArea::Max, max_icon, false, cx))
-            .child(self.render_window_button("win-close", WindowControlArea::Close, IconName::WindowClose, true, cx))
+            .child(self.render_window_button(
+                "win-min",
+                WindowControlArea::Min,
+                IconName::WindowMinimize,
+                false,
+                cx,
+            ))
+            .child(self.render_window_button(
+                "win-max",
+                WindowControlArea::Max,
+                max_icon,
+                false,
+                cx,
+            ))
+            .child(self.render_window_button(
+                "win-close",
+                WindowControlArea::Close,
+                IconName::WindowClose,
+                true,
+                cx,
+            ))
             // 状态胶囊：仅录音/处理时浮现，绝对居中于整条标题栏（更优雅；纯展示、不挡拖拽与按钮）。
             .when(active, |this| {
                 this.child(
@@ -1205,7 +1280,11 @@ impl VoxInk {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         // 悬停反馈：关闭键 → 红底白图标；最小化/最大化 → 浅底 + 深色图标（不可用白色，否则图标看不见）。
-        let hover_fg = if is_close { white() } else { cx.theme().foreground };
+        let hover_fg = if is_close {
+            white()
+        } else {
+            cx.theme().foreground
+        };
         let hover_bg = if is_close { DANGER } else { cx.theme().muted };
         div()
             .id(id)
@@ -1399,9 +1478,12 @@ impl VoxInk {
         let (bg, label, clickable, glyph): (Hsla, _, bool, RecordGlyph) =
             match self.state.recording_state {
                 RecordingState::Idle => (BRAND, tr("record.start"), true, RecordGlyph::Dot),
-                RecordingState::Recording => {
-                    (STATUS_RECORDING, tr("record.stop"), true, RecordGlyph::Square)
-                }
+                RecordingState::Recording => (
+                    STATUS_RECORDING,
+                    tr("record.stop"),
+                    true,
+                    RecordGlyph::Square,
+                ),
                 RecordingState::Processing => (
                     STATUS_PROCESSING,
                     tr("record.processing"),
@@ -1644,7 +1726,11 @@ impl VoxInk {
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("{} ({})", tr("segments.title"), self.segments.len())),
+                    .child(format!(
+                        "{} ({})",
+                        tr("segments.title"),
+                        self.segments.len()
+                    )),
             );
 
         if self.segments.is_empty() {
@@ -1695,13 +1781,18 @@ impl VoxInk {
             .py_1p5()
             .rounded(px(6.))
             .hover(|s| s.bg(cx.theme().list_hover))
-            .child(div().size(px(6.)).rounded_full().bg(mode_dot(&seg.mode, cx)))
             .child(
-                v_flex()
+                div()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(mode_dot(&seg.mode, cx)),
+            )
+            .child(
+                div()
                     .flex_1()
+                    .min_w_0()
                     .overflow_hidden()
-                    .gap_0p5()
-                    .child(div().w_full().text_sm().truncate().child(snippet))
+                    .child(div().w_full().text_sm().truncate().mb(px(2.)).child(snippet))
                     .child(
                         h_flex()
                             .gap_2()
@@ -1713,34 +1804,39 @@ impl VoxInk {
                     ),
             )
             .child(
-                Button::new(elem_id("seg-play", &seg.id))
-                    .ghost()
-                    .small()
-                    .icon(IconName::Play)
-                    .tooltip(tr("segments.play"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.play_segment(path_play.clone(), window, cx)
-                    })),
-            )
-            .child(
-                Button::new(elem_id("seg-re", &seg.id))
-                    .ghost()
-                    .small()
-                    .icon(IconName::Redo)
-                    .tooltip(tr("segments.retranscribe"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.retranscribe_segment(id_re.clone(), path_re.clone(), window, cx)
-                    })),
-            )
-            .child(
-                Button::new(elem_id("seg-del", &seg.id))
-                    .ghost()
-                    .small()
-                    .icon(IconName::Close)
-                    .tooltip(tr("segments.delete"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.delete_segment(id_del.clone(), window, cx)
-                    })),
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_0p5()
+                    .child(
+                        Button::new(elem_id("seg-play", &seg.id))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Play)
+                            .tooltip(tr("segments.play"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.play_segment(path_play.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(elem_id("seg-re", &seg.id))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Redo)
+                            .tooltip(tr("segments.retranscribe"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.retranscribe_segment(id_re.clone(), path_re.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(elem_id("seg-del", &seg.id))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Close)
+                            .tooltip(tr("segments.delete"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.delete_segment(id_del.clone(), window, cx)
+                            })),
+                    ),
             )
     }
 }
@@ -1770,26 +1866,21 @@ impl Render for VoxInk {
                             .min_h_0()
                             .overflow_hidden()
                             .child(
-                                h_flex()
-                                    .size_full()
-                                    .child(self.render_sidebar(cx))
-                                    .child(
-                                        // 右栏：录制控制 + 编辑区 + 底栏。
-                                        v_flex()
-                                            .flex_1()
-                                            .h_full()
-                                            .child(self.render_controls(cx))
-                                            .child(self.render_editor(cx))
-                                            .when(self.show_segments, |this| {
-                                                this.child(self.render_segments(cx))
-                                            })
-                                            .child(self.render_footer(cx)),
-                                    ),
+                                h_flex().size_full().child(self.render_sidebar(cx)).child(
+                                    // 右栏：录制控制 + 编辑区 + 底栏。
+                                    v_flex()
+                                        .flex_1()
+                                        .h_full()
+                                        .child(self.render_controls(cx))
+                                        .child(self.render_editor(cx))
+                                        .when(self.show_segments, |this| {
+                                            this.child(self.render_segments(cx))
+                                        })
+                                        .child(self.render_footer(cx)),
+                                ),
                             )
                             // 设置面板覆盖层（M11）：盖住内容区，标题栏仍可用。
-                            .when(self.show_settings, |this| {
-                                this.child(self.settings.clone())
-                            }),
+                            .when(self.show_settings, |this| this.child(self.settings.clone())),
                     ),
             )
             .children(notification_layer)
@@ -1803,7 +1894,9 @@ impl Render for VoxInk {
 /// 后续若支持 Linux 需保持 Clipboard 实例存活，留待相应里程碑处理。
 fn copy_to_clipboard(text: &str) -> Result<()> {
     let mut clipboard = arboard::Clipboard::new().context("打开系统剪贴板失败")?;
-    clipboard.set_text(text.to_owned()).context("写入剪贴板失败")?;
+    clipboard
+        .set_text(text.to_owned())
+        .context("写入剪贴板失败")?;
     Ok(())
 }
 
@@ -1969,7 +2062,12 @@ pub(crate) fn runtime_asr_config(cx: &App, want_streaming: bool) -> AsrConfig {
 }
 
 /// 将转写文本追加到编辑器末尾（追加模式，§4.3.1）。
-fn append_text(editor: &Entity<InputState>, text: &str, window: &mut Window, cx: &mut Context<VoxInk>) {
+fn append_text(
+    editor: &Entity<InputState>,
+    text: &str,
+    window: &mut Window,
+    cx: &mut Context<VoxInk>,
+) {
     editor.update(cx, |state, cx| {
         let mut value = state.value().to_string();
         if !value.is_empty() {

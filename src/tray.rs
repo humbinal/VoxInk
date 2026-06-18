@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use gpui::{App, Entity, Window, WindowHandle};
 use gpui_component::Root;
 
@@ -32,7 +32,8 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
     let settings = MenuItem::with_id("settings", "设置", true, None);
     let quit = MenuItem::with_id("quit", "退出", true, None);
     let append = |item: &dyn tray_icon::menu::IsMenuItem| -> Result<()> {
-        menu.append(item).map_err(|e| anyhow!("添加托盘菜单项失败: {e}"))
+        menu.append(item)
+            .map_err(|e| anyhow!("添加托盘菜单项失败: {e}"))
     };
     append(&open)?;
     append(&PredefinedMenuItem::separator())?;
@@ -50,7 +51,9 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
     if let Some(icon) = tray_icon_image() {
         builder = builder.with_icon(icon);
     }
-    let tray = builder.build().map_err(|e| anyhow!("创建系统托盘失败: {e}"))?;
+    let tray = builder
+        .build()
+        .map_err(|e| anyhow!("创建系统托盘失败: {e}"))?;
     cx.set_global(GlobalTray(tray));
 
     // 关闭按钮（X）→ 隐藏到托盘，取消真正的关闭。
@@ -126,7 +129,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
             }
         }
     })
-        .detach();
+    .detach();
 
     Ok(())
 }
@@ -225,7 +228,7 @@ mod winimpl {
 
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsWindowVisible, SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW,
+        IsWindowVisible, SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow,
     };
 
     fn hwnd(h: isize) -> HWND {

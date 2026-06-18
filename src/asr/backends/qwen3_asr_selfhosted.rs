@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::multipart;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -202,7 +202,10 @@ async fn run_session(
     let (mut sink, mut stream) = ws.split();
 
     // 连接后立即发送 start；服务端就绪后回 started，届时才开始发音频。
-    if let Err(e) = sink.send(Message::Text(start_message(lang).to_string())).await {
+    if let Err(e) = sink
+        .send(Message::Text(start_message(lang).to_string()))
+        .await
+    {
         return SessionOutcome::Disconnected(AsrError::WebSocketError(format!(
             "发送 start 失败: {e}"
         )));

@@ -4,8 +4,8 @@
 //! 通知 worker 排空缓冲、收尾 WAV 并返回产物。cpal `Stream` 不跨线程移动（留在主线程）。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -13,9 +13,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use ringbuf::traits::{Consumer, Producer};
 
-use super::buffer::{new_buffer, AudioCons, AudioProd};
+use super::buffer::{AudioCons, AudioProd, new_buffer};
 use super::resample::MonoResampler;
-use super::writer::{create_writer, WavSink};
+use super::writer::{WavSink, create_writer};
 use super::{AudioError, LevelMeter, RecordingOutcome};
 
 /// 录音会话句柄。持有 cpal 流（主线程）、停止标志与 worker 线程句柄。
@@ -39,7 +39,9 @@ pub(crate) struct OpenCapture {
 /// 探测默认输入设备、建环形缓冲、构建并启动采集流。
 pub(crate) fn open_capture() -> Result<OpenCapture, AudioError> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or(AudioError::NoInputDevice)?;
+    let device = host
+        .default_input_device()
+        .ok_or(AudioError::NoInputDevice)?;
     let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
 
     let supported = device

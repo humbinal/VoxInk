@@ -13,8 +13,8 @@ pub mod resample;
 pub mod writer;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 pub use capture::Recorder;

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use directories::BaseDirs;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -171,13 +171,7 @@ impl HistoryDb {
 
     /// 保存记录正文（更新 text/title/mode/duration/updated_at）。
     /// 标题由正文首行派生；空正文回退到 [`NEW_RECORD_TITLE`]。
-    pub fn save_record(
-        &self,
-        id: &str,
-        text: &str,
-        mode: &str,
-        duration_secs: u32,
-    ) -> Result<()> {
+    pub fn save_record(&self, id: &str, text: &str, mode: &str, duration_secs: u32) -> Result<()> {
         let title = derive_title(text);
         self.conn
             .execute(
@@ -275,10 +269,7 @@ impl HistoryDb {
         let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
         let n = self
             .conn
-            .execute(
-                "DELETE FROM records WHERE updated_at < ?1",
-                params![cutoff],
-            )
+            .execute("DELETE FROM records WHERE updated_at < ?1", params![cutoff])
             .context("清理过期记录失败")?;
         Ok(n)
     }
@@ -402,7 +393,10 @@ impl HistoryDb {
                 .collect()
         };
         self.conn
-            .execute("DELETE FROM segments WHERE created_at < ?1", params![cutoff])
+            .execute(
+                "DELETE FROM segments WHERE created_at < ?1",
+                params![cutoff],
+            )
             .context("清理过期片段失败")?;
         Ok(paths)
     }
@@ -464,7 +458,9 @@ fn derive_title(text: &str) -> String {
 
 /// 转义 LIKE 通配符，配合 `ESCAPE '\'`。
 fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 #[cfg(test)]
@@ -540,7 +536,8 @@ mod tests {
         let db = mem_db();
         let a = db.create_record().unwrap();
         let b = db.create_record().unwrap();
-        db.save_record(&a.id, "帮我写一段提示词", "offline", 1).unwrap();
+        db.save_record(&a.id, "帮我写一段提示词", "offline", 1)
+            .unwrap();
         db.save_record(&b.id, "今天天气不错", "offline", 1).unwrap();
 
         let hits = db.search_records("提示词").unwrap();
@@ -558,8 +555,10 @@ mod tests {
         let r = db.create_record().unwrap();
         let p1 = std::path::Path::new("/tmp/voxink/r1/a.wav");
         let p2 = std::path::Path::new("/tmp/voxink/r1/b.wav");
-        db.add_segment(&r.id, p1, "offline", "第一段", 5, 100).unwrap();
-        db.add_segment(&r.id, p2, "streaming", "第二段", 7, 200).unwrap();
+        db.add_segment(&r.id, p1, "offline", "第一段", 5, 100)
+            .unwrap();
+        db.add_segment(&r.id, p2, "streaming", "第二段", 7, 200)
+            .unwrap();
 
         let segs = db.list_segments(&r.id).unwrap();
         assert_eq!(segs.len(), 2);
@@ -578,8 +577,15 @@ mod tests {
     fn purge_audio_returns_paths() {
         let db = mem_db();
         let r = db.create_record().unwrap();
-        db.add_segment(&r.id, std::path::Path::new("/tmp/x.wav"), "offline", "", 1, 1)
-            .unwrap();
+        db.add_segment(
+            &r.id,
+            std::path::Path::new("/tmp/x.wav"),
+            "offline",
+            "",
+            1,
+            1,
+        )
+        .unwrap();
         // days=0 不清理；刚建的片段在 30 天内也不过期。
         assert_eq!(db.purge_audio_older_than(0).unwrap().len(), 0);
         assert_eq!(db.purge_audio_older_than(30).unwrap().len(), 0);

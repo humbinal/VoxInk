@@ -3,8 +3,8 @@
 //! 上传为私有对象，再生成**预签名 GET URL** 供 DashScope 拉取（避免对象公开，符合隐私优先）。
 //! 仅实现本场景所需的 PUT 上传与 GET 预签名，不是通用 OSS SDK。
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
@@ -56,9 +56,7 @@ impl<'a> OssClient<'a> {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<(), AsrError> {
-        let date = Utc::now()
-            .format("%a, %d %b %Y %H:%M:%S GMT")
-            .to_string();
+        let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
         let resource = format!("/{}/{}", self.bucket, key);
         // V1: VERB\nContent-MD5\nContent-Type\nDate\nCanonicalizedResource
         let string_to_sign = format!("PUT\n\n{content_type}\n{date}\n{resource}");

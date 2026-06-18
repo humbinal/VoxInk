@@ -21,9 +21,9 @@ mod tray;
 
 use anyhow::Result;
 use app::{GlobalConfig, GlobalTokioHandle, VoxInk};
-use config::VoxInkConfig;
-use gpui::{prelude::*, px, size, App, Bounds, Entity, WindowBounds, WindowOptions};
 use assets::VoxInkAssets;
+use config::VoxInkConfig;
+use gpui::{App, Bounds, Entity, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::{Root, TitleBar};
 use tracing_subscriber::EnvFilter;
 

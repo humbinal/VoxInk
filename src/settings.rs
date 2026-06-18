@@ -7,25 +7,30 @@
 //! 离线选「大文件」后端时额外显示 OSS 参数。下拉为自绘内联展开列表（避免浮层裁剪/复杂依赖）。
 
 use gpui::{
-    div, prelude::*, px, rgba, ClickEvent, Context, Entity, EventEmitter, IntoElement,
-    ParentElement, Render, ScrollHandle, Styled, Window,
+    ClickEvent, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, ScrollHandle,
+    Styled, Window, div, prelude::*, px, rgba,
 };
 use gpui_component::{
+    ActiveTheme, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
     scroll::{Scrollbar, ScrollbarShow},
     switch::Switch,
-    v_flex, ActiveTheme, IconName, Sizable, WindowExt,
+    v_flex,
 };
 
-use crate::app::{friendly_asr_error, runtime_asr_config, GlobalConfig, GlobalTokioHandle};
+use crate::app::{GlobalConfig, GlobalTokioHandle, friendly_asr_error, notify, runtime_asr_config};
 use crate::asr::{AsrError, BackendRegistry};
 use crate::config::VoxInkConfig;
 use crate::i18n::tr;
 use crate::state::TranscriptionMode;
 
 const FILETRANS_ID: &str = "aliyun_bailian_filetrans";
+/// 设置面板宽度（px）。固定居中覆盖层，与主窗口尺寸无关；上限取主窗口最小宽度（640）以免溢出。
+const PANEL_WIDTH: f32 = 640.0;
+/// 「标签在左、控件在右」字段行中右侧控件列的固定宽度（px）。
+const FIELD_CONTROL_WIDTH: f32 = 300.0;
 
 /// 设置面板事件：请求关闭。
 pub enum SettingsEvent {
@@ -93,7 +98,8 @@ impl EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = |window: &mut Window, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx));
+        let input =
+            |window: &mut Window, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx));
         Self {
             max_secs: input(window, cx),
             stream_api_key: cx
@@ -107,9 +113,8 @@ impl SettingsView {
             off_oss_ak_id: input(window, cx),
             off_oss_ak_secret: input(window, cx),
             open_dropdown: Dropdown::None,
-            audio_dir: cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tr("settings.audio_dir_ph"))
-            }),
+            audio_dir: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr("settings.audio_dir_ph"))),
             audio_retention: input(window, cx),
             text_retention: input(window, cx),
             audio_usage_bytes: 0,
@@ -126,8 +131,9 @@ impl SettingsView {
         self.max_secs.update(cx, |s, cx| {
             s.set_value(c.asr.max_recording_seconds.to_string(), window, cx)
         });
-        self.audio_dir
-            .update(cx, |s, cx| s.set_value(c.storage.audio_dir.clone(), window, cx));
+        self.audio_dir.update(cx, |s, cx| {
+            s.set_value(c.storage.audio_dir.clone(), window, cx)
+        });
         self.audio_retention.update(cx, |s, cx| {
             s.set_value(c.storage.audio_retention_days.to_string(), window, cx)
         });
@@ -143,7 +149,12 @@ impl SettingsView {
         self.load_offline_inputs(&c, window, cx);
     }
 
-    fn load_stream_inputs(&mut self, c: &VoxInkConfig, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_stream_inputs(
+        &mut self,
+        c: &VoxInkConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let b = c.asr.backend(&c.asr.streaming_backend);
         self.stream_api_key
             .update(cx, |s, cx| s.set_value(b.api_key.clone(), window, cx));
@@ -151,7 +162,12 @@ impl SettingsView {
             .update(cx, |s, cx| s.set_value(b.endpoint.clone(), window, cx));
     }
 
-    fn load_offline_inputs(&mut self, c: &VoxInkConfig, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_offline_inputs(
+        &mut self,
+        c: &VoxInkConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let b = c.asr.backend(&c.asr.offline_backend);
         self.off_api_key
             .update(cx, |s, cx| s.set_value(b.api_key.clone(), window, cx));
@@ -161,10 +177,12 @@ impl SettingsView {
             .update(cx, |s, cx| s.set_value(b.oss_endpoint.clone(), window, cx));
         self.off_oss_bucket
             .update(cx, |s, cx| s.set_value(b.oss_bucket.clone(), window, cx));
-        self.off_oss_ak_id
-            .update(cx, |s, cx| s.set_value(b.oss_access_key_id.clone(), window, cx));
-        self.off_oss_ak_secret
-            .update(cx, |s, cx| s.set_value(b.oss_access_key_secret.clone(), window, cx));
+        self.off_oss_ak_id.update(cx, |s, cx| {
+            s.set_value(b.oss_access_key_id.clone(), window, cx)
+        });
+        self.off_oss_ak_secret.update(cx, |s, cx| {
+            s.set_value(b.oss_access_key_secret.clone(), window, cx)
+        });
     }
 
     /// 读改写一份 GlobalConfig（退出时统一落盘；部分项即时生效）。
@@ -260,7 +278,11 @@ impl SettingsView {
         let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
             return;
         };
-        window.push_notification(format!("{}（{backend_id}）…", tr("settings.test")), cx);
+        notify(
+            window,
+            format!("{}（{backend_id}）…", tr("settings.test")),
+            cx,
+        );
 
         cx.spawn_in(window, async move |_this, cx| {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -274,11 +296,13 @@ impl SettingsView {
             });
             let outcome = rx.await;
             let _ = cx.update(|window, cx| match outcome {
-                Ok(Ok(())) => window.push_notification("连接测试成功 ✓", cx),
-                Ok(Err(e)) => {
-                    window.push_notification(format!("连接测试失败：{}", friendly_asr_error(&e)), cx)
-                }
-                Err(_) => window.push_notification("连接测试中断", cx),
+                Ok(Ok(())) => notify(window, "连接测试成功 ✓", cx),
+                Ok(Err(e)) => notify(
+                    window,
+                    format!("连接测试失败：{}", friendly_asr_error(&e)),
+                    cx,
+                ),
+                Err(_) => notify(window, "连接测试中断", cx),
             });
         })
         .detach();
@@ -304,10 +328,13 @@ impl SettingsView {
             {
                 let _ = this.update_in(cx, |this, window, cx| {
                     let s = dir.to_string_lossy().to_string();
-                    this.audio_dir.update(cx, |st, cx| st.set_value(s.clone(), window, cx));
+                    this.audio_dir
+                        .update(cx, |st, cx| st.set_value(s.clone(), window, cx));
                     this.update_config(cx, |c| c.storage.audio_dir = s);
-                    this.audio_usage_bytes =
-                        this.current_audio_root(cx).map(|r| dir_size(&r)).unwrap_or(0);
+                    this.audio_usage_bytes = this
+                        .current_audio_root(cx)
+                        .map(|r| dir_size(&r))
+                        .unwrap_or(0);
                     cx.notify();
                 });
             }
@@ -329,7 +356,7 @@ impl SettingsView {
         let Some(dir) = dir else { return };
         if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::warn!("创建音频目录失败: {e:#}");
-            window.push_notification("无法打开目录", cx);
+            notify(window, "无法打开目录", cx);
             return;
         }
         cx.open_with_system(&dir);
@@ -357,8 +384,11 @@ impl SettingsView {
             },
             None => 0,
         };
-        self.audio_usage_bytes = self.current_audio_root(cx).map(|r| dir_size(&r)).unwrap_or(0);
-        window.push_notification(format!("已清理 {removed} 个过期录音"), cx);
+        self.audio_usage_bytes = self
+            .current_audio_root(cx)
+            .map(|r| dir_size(&r))
+            .unwrap_or(0);
+        notify(window, format!("已清理 {removed} 个过期录音"), cx);
         cx.notify();
     }
 
@@ -367,11 +397,11 @@ impl SettingsView {
         match crate::app::export_history_json(cx) {
             Ok(path) => {
                 tracing::info!("历史已导出: {}", path.display());
-                window.push_notification(format!("已导出到 {}", path.display()), cx);
+                notify(window, format!("已导出到 {}", path.display()), cx);
             }
             Err(e) => {
                 tracing::error!("导出历史失败: {e:#}");
-                window.push_notification("导出失败", cx);
+                notify(window, "导出失败", cx);
             }
         }
     }
@@ -382,11 +412,11 @@ impl SettingsView {
         match crate::diagnostics::export(&config) {
             Ok(path) => {
                 tracing::info!("诊断已导出: {}", path.display());
-                window.push_notification(format!("已导出到 {}", path.display()), cx);
+                notify(window, format!("已导出到 {}", path.display()), cx);
             }
             Err(e) => {
                 tracing::error!("导出诊断失败: {e:#}");
-                window.push_notification("导出诊断失败", cx);
+                notify(window, "导出诊断失败", cx);
             }
         }
     }
@@ -399,7 +429,7 @@ impl SettingsView {
         {
             tracing::error!("保存配置失败: {e:#}");
         }
-        window.push_notification(tr("settings.saved"), cx);
+        notify(window, tr("settings.saved"), cx);
     }
 
     /// 关闭设置面板（右上角 X）。即时生效项（开关/主题等）已落入内存配置，
@@ -508,6 +538,42 @@ impl SettingsView {
             .child(control)
     }
 
+    /// 「标签在左、控件在右」字段行（ASR 区用）：右侧控件列定宽，可在其中纵向叠放输入框 + 提示。
+    /// 顶部对齐，使带提示的多行控件与标签对齐自然。
+    fn field(&self, label_key: &str, right: impl IntoElement) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .justify_between()
+            .items_start()
+            .py_1()
+            .gap_3()
+            .child(div().pt_1().child(tr(label_key)))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(FIELD_CONTROL_WIDTH))
+                    .child(right),
+            )
+    }
+
+    /// 「测试连接」按钮行：右对齐、按钮取自然宽度（不占整行）。
+    fn test_button(
+        &self,
+        id: &'static str,
+        streaming: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex().w_full().justify_end().py_1().child(
+            Button::new(id)
+                .outline()
+                .small()
+                .label(tr("settings.test"))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.on_test(streaming, window, cx)),
+                ),
+        )
+    }
+
     /// 自绘下拉：当前项按钮 + 展开时内联列表。
     fn render_dropdown(
         &self,
@@ -603,7 +669,11 @@ impl Render for SettingsView {
         // 按能力筛选并按 id 排序（避免 HashMap 顺序抖动）。
         let mut all = BackendRegistry::with_builtins().list();
         all.sort_by(|a, b| a.id.cmp(&b.id));
-        let streaming_opts: Vec<_> = all.iter().filter(|b| b.supports_streaming).cloned().collect();
+        let streaming_opts: Vec<_> = all
+            .iter()
+            .filter(|b| b.supports_streaming)
+            .cloned()
+            .collect();
         let offline_opts: Vec<_> = all.iter().filter(|b| b.supports_offline).cloned().collect();
         let off_is_filetrans = cfg.asr.offline_backend == FILETRANS_ID;
         // 离线与实时选同一后端（如 Qwen3-ASR 自建服务）时，共用一份配置：离线区不再重复渲染输入框。
@@ -621,52 +691,63 @@ impl Render for SettingsView {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             // ── ASR ──
-            .when(self.active_tab == SettingsTab::Asr, |this| this
-            .child(self.field_label("settings.streaming_backend", cx))
-            .child(self.render_dropdown(
-                Dropdown::Streaming,
-                &cfg.asr.streaming_backend,
-                streaming_opts,
-                cx,
-            ))
-            .child(self.field_label("settings.api_key", cx))
-            .child(Input::new(&self.stream_api_key).small())
-            .child(self.api_key_env_hint(&cfg.asr.streaming_backend, cx))
-            .child(self.field_label("settings.endpoint", cx))
-            .child(Input::new(&self.stream_endpoint).small())
-            .child(
-                div().pt_2().child(
-                    Button::new("test-stream")
-                        .outline()
-                        .small()
-                        .label(tr("settings.test"))
-                        .on_click(cx.listener(|this, _, window, cx| this.on_test(true, window, cx))),
-                ),
-            )
-            // ── ASR：离线 ──
-            .child(self.field_label("settings.offline_backend", cx))
-            .child(self.render_dropdown(
-                Dropdown::Offline,
-                &cfg.asr.offline_backend,
-                offline_opts,
-                cx,
-            ))
-            // 与实时共用同一后端时，仅给出提示，不重复渲染输入框（避免双份编辑互相覆盖）。
-            .when(off_shared, |this| {
-                this.child(
-                    div()
-                        .pt_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr("settings.shared_config_hint")),
+            .when(self.active_tab == SettingsTab::Asr, |this| {
+                this.child(self.field(
+                    "settings.streaming_backend",
+                    self.render_dropdown(
+                        Dropdown::Streaming,
+                        &cfg.asr.streaming_backend,
+                        streaming_opts,
+                        cx,
+                    ),
+                ))
+                .child(
+                    self.field(
+                        "settings.api_key",
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(Input::new(&self.stream_api_key).small())
+                            .child(self.api_key_env_hint(&cfg.asr.streaming_backend, cx)),
+                    ),
                 )
-            })
-            .when(!off_shared, |this| {
-                this.child(self.field_label("settings.api_key", cx))
-                    .child(Input::new(&self.off_api_key).small())
-                    .child(self.api_key_env_hint(&cfg.asr.offline_backend, cx))
-                    .child(self.field_label("settings.endpoint", cx))
-                    .child(Input::new(&self.off_endpoint).small())
+                .child(self.field(
+                    "settings.endpoint",
+                    Input::new(&self.stream_endpoint).small(),
+                ))
+                .child(self.test_button("test-stream", true, cx))
+                // ── ASR：离线 ──
+                .child(self.field(
+                    "settings.offline_backend",
+                    self.render_dropdown(
+                        Dropdown::Offline,
+                        &cfg.asr.offline_backend,
+                        offline_opts,
+                        cx,
+                    ),
+                ))
+                // 与实时共用同一后端时，仅给出提示，不重复渲染输入框（避免双份编辑互相覆盖）。
+                .when(off_shared, |this| {
+                    this.child(
+                        div()
+                            .pt_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr("settings.shared_config_hint")),
+                    )
+                })
+                .when(!off_shared, |this| {
+                    this.child(
+                        self.field(
+                            "settings.api_key",
+                            v_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(Input::new(&self.off_api_key).small())
+                                .child(self.api_key_env_hint(&cfg.asr.offline_backend, cx)),
+                        ),
+                    )
+                    .child(self.field("settings.endpoint", Input::new(&self.off_endpoint).small()))
                     // 大文件后端额外的 OSS 参数
                     .when(off_is_filetrans, |this| {
                         this.child(
@@ -676,198 +757,236 @@ impl Render for SettingsView {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tr("settings.oss_hint")),
                         )
-                        .child(self.field_label("settings.oss_endpoint", cx))
-                        .child(Input::new(&self.off_oss_endpoint).small())
-                        .child(self.field_label("settings.oss_bucket", cx))
-                        .child(Input::new(&self.off_oss_bucket).small())
-                        .child(self.field_label("settings.oss_ak_id", cx))
-                        .child(Input::new(&self.off_oss_ak_id).small())
-                        .child(self.field_label("settings.oss_ak_secret", cx))
-                        .child(Input::new(&self.off_oss_ak_secret).small())
+                        .child(self.field(
+                            "settings.oss_endpoint",
+                            Input::new(&self.off_oss_endpoint).small(),
+                        ))
+                        .child(self.field(
+                            "settings.oss_bucket",
+                            Input::new(&self.off_oss_bucket).small(),
+                        ))
+                        .child(self.field(
+                            "settings.oss_ak_id",
+                            Input::new(&self.off_oss_ak_id).small(),
+                        ))
+                        .child(self.field(
+                            "settings.oss_ak_secret",
+                            Input::new(&self.off_oss_ak_secret).small(),
+                        ))
                     })
+                })
+                .child(self.test_button("test-offline", false, cx))
             })
-            .child(
-                div().pt_2().child(
-                    Button::new("test-offline")
-                        .outline()
-                        .small()
-                        .label(tr("settings.test"))
-                        .on_click(cx.listener(|this, _, window, cx| this.on_test(false, window, cx))),
-                ),
-            ))
             // ── 录音 ──
-            .when(self.active_tab == SettingsTab::Recording, |this| this
-            .child(self.labeled("settings.default_mode", self.mode_choice(mode, cx)))
-            .child(self.labeled(
-                "settings.auto_copy",
-                Switch::new("auto-copy")
-                    .checked(cfg.text.auto_copy)
-                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
-                        let v = *checked;
-                        this.update_config(cx, |c| c.text.auto_copy = v);
-                        cx.notify();
-                    })),
-            ))
-            .child(self.labeled(
-                "settings.audio_feedback",
-                Switch::new("audio-feedback")
-                    .checked(cfg.general.audio_feedback)
-                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
-                        let v = *checked;
-                        this.update_config(cx, |c| c.general.audio_feedback = v);
-                        cx.notify();
-                    })),
-            ))
-            .child(self.labeled(
-                "settings.max_seconds",
-                div().w(px(120.)).child(Input::new(&self.max_secs).small()),
-            )))
-            // ── 通用 ──
-            .when(self.active_tab == SettingsTab::General, |this| this
-            .child(self.labeled(
-                "settings.autostart",
-                Switch::new("autostart")
-                    .checked(cfg.general.launch_at_startup)
-                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
-                        let v = *checked;
-                        this.update_config(cx, |c| c.general.launch_at_startup = v);
-                        if let Err(e) = crate::autolaunch::set_enabled(v) {
-                            tracing::warn!("设置开机自启失败: {e:#}");
-                        }
-                        cx.notify();
-                    })),
-            ))
-            .child(self.labeled(
-                "settings.minimized",
-                Switch::new("minimized")
-                    .checked(cfg.general.start_minimized)
-                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
-                        let v = *checked;
-                        this.update_config(cx, |c| c.general.start_minimized = v);
-                        cx.notify();
-                    })),
-            ))
-            .child(self.labeled(
-                "settings.on_top",
-                Switch::new("on-top")
-                    .checked(cfg.general.window_on_top)
-                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
-                        let v = *checked;
-                        this.update_config(cx, |c| c.general.window_on_top = v);
-                        cx.notify();
-                    })),
-            ))
-            .child(self.labeled("settings.theme", self.theme_choice(&theme, cx)))
-            .child(self.labeled("settings.language", self.lang_choice(lang, cx))))
-            // ── 快捷键 ──
-            .when(self.active_tab == SettingsTab::Shortcuts, |this| this
-            .child(self.shortcut_row("shortcut.toggle_recording", &cfg.shortcuts.toggle_recording, cx))
-            .child(self.shortcut_row("shortcut.toggle_window", &cfg.shortcuts.toggle_window, cx))
-            .child(self.shortcut_row("shortcut.copy_paste", &cfg.shortcuts.copy_and_paste, cx))
-            .child(
-                div()
-                    .pt_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr("settings.shortcuts_hint")),
-            ))
-            // ── 数据 ──
-            .when(self.active_tab == SettingsTab::Data, |this| this
-            .child(self.labeled(
-                "settings.save_audio",
-                Switch::new("save-audio")
-                    .checked(cfg.storage.save_audio)
-                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
-                        let v = *checked;
-                        this.update_config(cx, |c| c.storage.save_audio = v);
-                        cx.notify();
-                    })),
-            ))
-            .child(self.field_label("settings.audio_dir", cx))
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.audio_dir).small()))
+            .when(self.active_tab == SettingsTab::Recording, |this| {
+                this.child(self.labeled("settings.default_mode", self.mode_choice(mode, cx)))
                     .child(
-                        Button::new("audio-browse")
-                            .outline()
-                            .small()
-                            .label(tr("settings.browse"))
-                            .on_click(cx.listener(Self::on_browse_audio_dir)),
+                        self.labeled(
+                            "settings.auto_copy",
+                            Switch::new("auto-copy")
+                                .checked(cfg.text.auto_copy)
+                                .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                                    let v = *checked;
+                                    this.update_config(cx, |c| c.text.auto_copy = v);
+                                    cx.notify();
+                                })),
+                        ),
                     )
                     .child(
-                        Button::new("audio-open")
+                        self.labeled(
+                            "settings.audio_feedback",
+                            Switch::new("audio-feedback")
+                                .checked(cfg.general.audio_feedback)
+                                .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                                    let v = *checked;
+                                    this.update_config(cx, |c| c.general.audio_feedback = v);
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                    .child(self.labeled(
+                        "settings.max_seconds",
+                        div().w(px(120.)).child(Input::new(&self.max_secs).small()),
+                    ))
+            })
+            // ── 通用 ──
+            .when(self.active_tab == SettingsTab::General, |this| {
+                this.child(
+                    self.labeled(
+                        "settings.autostart",
+                        Switch::new("autostart")
+                            .checked(cfg.general.launch_at_startup)
+                            .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                                let v = *checked;
+                                this.update_config(cx, |c| c.general.launch_at_startup = v);
+                                if let Err(e) = crate::autolaunch::set_enabled(v) {
+                                    tracing::warn!("设置开机自启失败: {e:#}");
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(
+                    self.labeled(
+                        "settings.minimized",
+                        Switch::new("minimized")
+                            .checked(cfg.general.start_minimized)
+                            .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                                let v = *checked;
+                                this.update_config(cx, |c| c.general.start_minimized = v);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(
+                    self.labeled(
+                        "settings.on_top",
+                        Switch::new("on-top")
+                            .checked(cfg.general.window_on_top)
+                            .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                                let v = *checked;
+                                this.update_config(cx, |c| c.general.window_on_top = v);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(self.labeled("settings.theme", self.theme_choice(&theme, cx)))
+                .child(self.labeled("settings.language", self.lang_choice(lang, cx)))
+            })
+            // ── 快捷键 ──
+            .when(self.active_tab == SettingsTab::Shortcuts, |this| {
+                this.child(self.shortcut_row(
+                    "shortcut.toggle_recording",
+                    &cfg.shortcuts.toggle_recording,
+                    cx,
+                ))
+                .child(self.shortcut_row(
+                    "shortcut.toggle_window",
+                    &cfg.shortcuts.toggle_window,
+                    cx,
+                ))
+                .child(self.shortcut_row("shortcut.copy_paste", &cfg.shortcuts.copy_and_paste, cx))
+                .child(
+                    div()
+                        .pt_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr("settings.shortcuts_hint")),
+                )
+            })
+            // ── 数据 ──
+            .when(self.active_tab == SettingsTab::Data, |this| {
+                this.child(
+                    self.labeled(
+                        "settings.save_audio",
+                        Switch::new("save-audio")
+                            .checked(cfg.storage.save_audio)
+                            .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                                let v = *checked;
+                                this.update_config(cx, |c| c.storage.save_audio = v);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(self.field_label("settings.audio_dir", cx))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&self.audio_dir).small()))
+                        .child(
+                            Button::new("audio-browse")
+                                .outline()
+                                .small()
+                                .label(tr("settings.browse"))
+                                .on_click(cx.listener(Self::on_browse_audio_dir)),
+                        )
+                        .child(
+                            Button::new("audio-open")
+                                .outline()
+                                .small()
+                                .label(tr("settings.open_folder"))
+                                .on_click(cx.listener(Self::on_open_audio_dir)),
+                        ),
+                )
+                .child(
+                    div()
+                        .pt_0p5()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr("settings.audio_dir_hint")),
+                )
+                .child(
+                    self.labeled(
+                        "settings.text_retention",
+                        div()
+                            .w(px(120.))
+                            .child(Input::new(&self.text_retention).small()),
+                    ),
+                )
+                .child(
+                    self.labeled(
+                        "settings.audio_retention",
+                        div()
+                            .w(px(120.))
+                            .child(Input::new(&self.audio_retention).small()),
+                    ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .py_1()
+                        .child(div().child(format!(
+                            "{} {}",
+                            tr("settings.audio_usage"),
+                            human_size(self.audio_usage_bytes)
+                        )))
+                        .child(
+                            Button::new("audio-clean")
+                                .outline()
+                                .small()
+                                .label(tr("settings.clean_audio"))
+                                .on_click(cx.listener(Self::on_clean_audio)),
+                        ),
+                )
+                .child(
+                    div().pt_3().child(
+                        Button::new("export-history")
                             .outline()
                             .small()
-                            .label(tr("settings.open_folder"))
-                            .on_click(cx.listener(Self::on_open_audio_dir)),
+                            .label(tr("settings.export_history"))
+                            .on_click(cx.listener(Self::on_export_history)),
                     ),
-            )
-            .child(
-                div()
-                    .pt_0p5()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr("settings.audio_dir_hint")),
-            )
-            .child(self.labeled(
-                "settings.text_retention",
-                div().w(px(120.)).child(Input::new(&self.text_retention).small()),
-            ))
-            .child(self.labeled(
-                "settings.audio_retention",
-                div().w(px(120.)).child(Input::new(&self.audio_retention).small()),
-            ))
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .items_center()
-                    .py_1()
-                    .child(div().child(format!(
-                        "{} {}",
-                        tr("settings.audio_usage"),
-                        human_size(self.audio_usage_bytes)
-                    )))
-                    .child(
-                        Button::new("audio-clean")
-                            .outline()
-                            .small()
-                            .label(tr("settings.clean_audio"))
-                            .on_click(cx.listener(Self::on_clean_audio)),
-                    ),
-            )
-            .child(
-                div().pt_3().child(
-                    Button::new("export-history")
-                        .outline()
-                        .small()
-                        .label(tr("settings.export_history"))
-                        .on_click(cx.listener(Self::on_export_history)),
-                ),
-            )
-            .child(
-                div()
-                    .pt_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr("settings.export_history_hint")),
-            ))
+                )
+                .child(
+                    div()
+                        .pt_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr("settings.export_history_hint")),
+                )
+            })
             // ── 关于 ──
-            .when(self.active_tab == SettingsTab::About, |this| this
-            .child(self.about_row("about.version", crate::diagnostics::VERSION, cx))
-            .child(self.about_row("about.build", &crate::diagnostics::build_time_display(), cx))
-            .child(self.about_row("about.commit", crate::diagnostics::GIT_HASH, cx))
-            .child(
-                div().pt_2().child(
-                    Button::new("export-diag")
-                        .outline()
-                        .small()
-                        .label(tr("about.export_diag"))
-                        .on_click(cx.listener(Self::on_export_diag)),
-                ),
-            ));
+            .when(self.active_tab == SettingsTab::About, |this| {
+                this.child(self.about_row("about.version", crate::diagnostics::VERSION, cx))
+                    .child(self.about_row(
+                        "about.build",
+                        &crate::diagnostics::build_time_display(),
+                        cx,
+                    ))
+                    .child(self.about_row("about.commit", crate::diagnostics::GIT_HASH, cx))
+                    .child(
+                        div().pt_2().child(
+                            Button::new("export-diag")
+                                .outline()
+                                .small()
+                                .label(tr("about.export_diag"))
+                                .on_click(cx.listener(Self::on_export_diag)),
+                        ),
+                    )
+            });
 
         // 覆盖层：半透明遮罩 + 居中面板。`.occlude()` 拦截鼠标，防止穿透到主视图误触录音。
         div()
@@ -880,7 +999,7 @@ impl Render for SettingsView {
             .bg(rgba(0x00000099))
             .child(
                 v_flex()
-                    .w(px(600.))
+                    .w(px(PANEL_WIDTH))
                     .h(px(560.))
                     .bg(cx.theme().background)
                     .border_1()
@@ -958,7 +1077,11 @@ impl Render for SettingsView {
 }
 
 impl SettingsView {
-    fn mode_choice(&self, mode: TranscriptionMode, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn mode_choice(
+        &self,
+        mode: TranscriptionMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let is_streaming = mode == TranscriptionMode::Streaming;
         h_flex()
             .gap_2()
@@ -969,7 +1092,9 @@ impl SettingsView {
                     .small()
                     .label(tr("mode.streaming"))
                     .on_click(cx.listener(|this, _, _w, cx| {
-                        this.update_config(cx, |c| c.asr.default_mode = TranscriptionMode::Streaming);
+                        this.update_config(cx, |c| {
+                            c.asr.default_mode = TranscriptionMode::Streaming
+                        });
                         cx.notify();
                     })),
             )
@@ -988,7 +1113,11 @@ impl SettingsView {
 
     fn theme_choice(&self, theme: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let cur = theme.to_string();
-        let btn = |id: &'static str, key: &'static str, val: &'static str, cur: &str, cx: &mut Context<Self>| {
+        let btn = |id: &'static str,
+                   key: &'static str,
+                   val: &'static str,
+                   cur: &str,
+                   cx: &mut Context<Self>| {
             let active = cur == val;
             Button::new(id)
                 .when(active, |b| b.primary())
@@ -1014,7 +1143,9 @@ impl SettingsView {
                     .when(!zh, |b| b.outline())
                     .small()
                     .label("中文")
-                    .on_click(cx.listener(|this, _, window, cx| this.set_language("zh-CN", window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.set_language("zh-CN", window, cx)),
+                    ),
             )
             .child(
                 Button::new("lang-en")
@@ -1022,7 +1153,9 @@ impl SettingsView {
                     .when(zh, |b| b.outline())
                     .small()
                     .label("English")
-                    .on_click(cx.listener(|this, _, window, cx| this.set_language("en", window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.set_language("en", window, cx)),
+                    ),
             )
     }
 
@@ -1050,7 +1183,11 @@ impl SettingsView {
             .justify_between()
             .items_center()
             .py_0p5()
-            .child(div().text_color(cx.theme().muted_foreground).child(tr(label_key)))
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr(label_key)),
+            )
             .child(div().child(value.to_string()))
     }
 }

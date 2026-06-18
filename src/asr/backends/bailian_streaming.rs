@@ -10,11 +10,11 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -273,7 +273,9 @@ async fn handle_text(text: &str, result_tx: &Sender<StreamingResult>) -> Event {
             if is_auth_error(code, message) {
                 Event::Failed(AsrError::AuthError)
             } else {
-                Event::Failed(AsrError::WebSocketError(format!("服务端错误[{code}]: {message}")))
+                Event::Failed(AsrError::WebSocketError(format!(
+                    "服务端错误[{code}]: {message}"
+                )))
             }
         }
 

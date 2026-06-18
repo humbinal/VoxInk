@@ -6,7 +6,7 @@
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use super::error::AsrError;
 
@@ -60,10 +60,10 @@ async fn handshake(
         Ok(ok) => ok,
         // 握手返回 401/403 → 鉴权失败（API Key 无效），映射为 AuthError 不重试。
         Err(tokio_tungstenite::tungstenite::Error::Http(resp))
-        if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 =>
-            {
-                return Err(AsrError::AuthError);
-            }
+            if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 =>
+        {
+            return Err(AsrError::AuthError);
+        }
         Err(e) => return Err(AsrError::WebSocketError(format!("WS 连接失败: {e}"))),
     };
     Ok(stream)

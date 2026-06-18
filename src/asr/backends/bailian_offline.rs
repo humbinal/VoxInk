@@ -9,8 +9,8 @@
 //! 同步返回文本，契合契约且无需公网 URL。单次音频上限约 10MB（约 3-4 分钟）。
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 
 use crate::asr::client::build_http_client;
@@ -150,7 +150,8 @@ impl AsrBackend for BailianOfflineBackend {
                 // 403 多为"模型未开通 / API Key 所属业务空间无该模型权限"，与 401（Key 本身无效）
                 // 含义不同。若混为 AuthError 会误导用户去查 API Key，故单独识别 AccessDenied。
                 let detail = response.text().await.unwrap_or_default();
-                if detail.contains("AccessDenied") || detail.to_lowercase().contains("access denied")
+                if detail.contains("AccessDenied")
+                    || detail.to_lowercase().contains("access denied")
                 {
                     return Err(AsrError::InvalidConfig(format!(
                         "模型访问被拒绝：请在百炼控制台开通 {MODEL} 模型，并确认 API Key 所属业务空间有该模型权限。详情: {detail}"

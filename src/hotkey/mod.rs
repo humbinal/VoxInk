@@ -16,13 +16,13 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::{AnyWindowHandle, App, Entity, WindowHandle};
-use gpui_component::{Root, WindowExt};
+use gpui_component::Root;
 
-use crate::app::VoxInk;
+use crate::app::{VoxInk, notify};
 use crate::config::ShortcutsConfig;
 
 /// 持有热键管理器使其在应用生命周期内存活（drop 会注销所有热键）。
@@ -76,7 +76,7 @@ pub fn setup_hotkeys(
             conflicts.join("、")
         );
         tracing::warn!("{msg}");
-        let _ = any_window.update(cx, |_, win, app| win.push_notification(msg, app));
+        let _ = any_window.update(cx, |_, win, app| notify(win, msg, app));
     }
 
     // 轮询热键事件并分发到对应动作（仅处理按下，忽略松开）。
@@ -108,7 +108,7 @@ pub fn setup_hotkeys(
             }
         }
     })
-        .detach();
+    .detach();
 
     Ok(())
 }
@@ -156,7 +156,7 @@ pub fn simulate_paste() {
 #[cfg(windows)]
 mod winimpl {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT, VK_V,
     };
 

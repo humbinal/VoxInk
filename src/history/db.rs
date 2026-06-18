@@ -28,8 +28,6 @@ pub struct Record {
     pub id: String,
     pub title: String,
     pub text: String,
-    /// 最近一次录制模式 "streaming" | "offline"；空文档为 ""。
-    pub mode: String,
     pub duration_secs: u32,
     /// RFC3339 UTC。
     pub created_at: String,
@@ -98,7 +96,6 @@ impl HistoryDb {
                     id            TEXT PRIMARY KEY,
                     title         TEXT NOT NULL,
                     text          TEXT NOT NULL,
-                    mode          TEXT NOT NULL,
                     duration_secs INTEGER NOT NULL,
                     created_at    TEXT NOT NULL,
                     updated_at    TEXT NOT NULL
@@ -134,6 +131,18 @@ impl HistoryDb {
                 "#,
             )
             .context("初始化历史数据库表结构失败")?;
+
+        // 迁移：移除历史遗留的 records.mode 列（不再使用；录制模式仍由各 segment 自行记录）。
+        // 老库该列为 NOT NULL 且无默认值，若保留会让省略它的 INSERT 失败，故主动删除。
+        let has_mode = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('records') WHERE name = 'mode'")?
+            .exists([])?;
+        if has_mode {
+            self.conn
+                .execute_batch("ALTER TABLE records DROP COLUMN mode;")
+                .context("移除历史遗留的 records.mode 列失败")?;
+        }
         Ok(())
     }
 
@@ -146,20 +155,18 @@ impl HistoryDb {
             id: Uuid::new_v4().to_string(),
             title: NEW_RECORD_TITLE.to_string(),
             text: String::new(),
-            mode: String::new(),
             duration_secs: 0,
             created_at: now.clone(),
             updated_at: now,
         };
         self.conn
             .execute(
-                "INSERT INTO records (id, title, text, mode, duration_secs, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO records (id, title, text, duration_secs, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     rec.id,
                     rec.title,
                     rec.text,
-                    rec.mode,
                     rec.duration_secs,
                     rec.created_at,
                     rec.updated_at
@@ -169,15 +176,15 @@ impl HistoryDb {
         Ok(rec)
     }
 
-    /// 保存记录正文（更新 text/title/mode/duration/updated_at）。
+    /// 保存记录正文（更新 text/title/duration/updated_at）。
     /// 标题由正文首行派生；空正文回退到 [`NEW_RECORD_TITLE`]。
-    pub fn save_record(&self, id: &str, text: &str, mode: &str, duration_secs: u32) -> Result<()> {
+    pub fn save_record(&self, id: &str, text: &str, duration_secs: u32) -> Result<()> {
         let title = derive_title(text);
         self.conn
             .execute(
-                "UPDATE records SET text = ?2, title = ?3, mode = ?4, duration_secs = ?5, updated_at = ?6
+                "UPDATE records SET text = ?2, title = ?3, duration_secs = ?4, updated_at = ?5
                  WHERE id = ?1",
-                params![id, text, title, mode, duration_secs, Utc::now().to_rfc3339()],
+                params![id, text, title, duration_secs, Utc::now().to_rfc3339()],
             )
             .context("保存记录失败")?;
         Ok(())
@@ -186,7 +193,7 @@ impl HistoryDb {
     /// 读取单条记录。
     pub fn get_record(&self, id: &str) -> Result<Option<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, text, mode, duration_secs, created_at, updated_at
+            "SELECT id, title, text, duration_secs, created_at, updated_at
              FROM records WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], map_record)?;
@@ -199,7 +206,7 @@ impl HistoryDb {
     /// 列出全部记录，按 `created_at` 倒序（最新创建的在前；顺序稳定，不因编辑/续录而跳变）。
     pub fn list_records(&self) -> Result<Vec<Record>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, text, mode, duration_secs, created_at, updated_at
+            "SELECT id, title, text, duration_secs, created_at, updated_at
              FROM records ORDER BY created_at DESC",
         )?;
         let rows = stmt
@@ -233,7 +240,7 @@ impl HistoryDb {
         if q.chars().count() < 3 {
             let like = format!("%{}%", escape_like(q));
             let mut stmt = self.conn.prepare(
-                "SELECT id, title, text, mode, duration_secs, created_at, updated_at
+                "SELECT id, title, text, duration_secs, created_at, updated_at
                  FROM records WHERE text LIKE ?1 ESCAPE '\\' ORDER BY created_at DESC",
             )?;
             let rows = stmt
@@ -246,7 +253,7 @@ impl HistoryDb {
         // 将用户输入整体作为一个字符串字面量（转义内部双引号），避免 FTS5 查询语法报错。
         let match_query = format!("\"{}\"", q.replace('"', "\"\""));
         let mut stmt = self.conn.prepare(
-            "SELECT r.id, r.title, r.text, r.mode, r.duration_secs, r.created_at, r.updated_at
+            "SELECT r.id, r.title, r.text, r.duration_secs, r.created_at, r.updated_at
              FROM records_fts
              JOIN records r ON r.rowid = records_fts.rowid
              WHERE records_fts MATCH ?1
@@ -353,12 +360,13 @@ impl HistoryDb {
         Ok(path.map(PathBuf::from))
     }
 
-    /// 更新某段片段的转写文本（重转写后回填）。
-    pub fn update_segment_text(&self, id: &str, text: &str) -> Result<()> {
+    /// 重转写后回填某段的文本与转写模式（圆点据此变色）。
+    /// 重转写固定走离线后端，故 `mode` 由调用方传 `"offline"`。
+    pub fn update_segment_transcription(&self, id: &str, text: &str, mode: &str) -> Result<()> {
         self.conn
             .execute(
-                "UPDATE segments SET text = ?2 WHERE id = ?1",
-                params![id, text],
+                "UPDATE segments SET text = ?2, mode = ?3 WHERE id = ?1",
+                params![id, text, mode],
             )
             .context("更新片段文本失败")?;
         Ok(())
@@ -416,10 +424,9 @@ fn map_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
         id: row.get(0)?,
         title: row.get(1)?,
         text: row.get(2)?,
-        mode: row.get(3)?,
-        duration_secs: row.get::<_, i64>(4)? as u32,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        duration_secs: row.get::<_, i64>(3)? as u32,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
     })
 }
 
@@ -478,13 +485,57 @@ mod tests {
         assert_eq!(rec.title, NEW_RECORD_TITLE);
         assert!(rec.text.is_empty());
 
-        db.save_record(&rec.id, "帮我写一段周报\n第二行", "offline", 12)
+        db.save_record(&rec.id, "帮我写一段周报\n第二行", 12)
             .unwrap();
         let got = db.get_record(&rec.id).unwrap().unwrap();
         assert_eq!(got.text, "帮我写一段周报\n第二行");
         assert_eq!(got.title, "帮我写一段周报 第二行"); // 折叠换行后取开头 50 字
-        assert_eq!(got.mode, "offline");
         assert_eq!(got.duration_secs, 12);
+    }
+
+    #[test]
+    fn migrates_old_db_dropping_mode_column() {
+        // 模拟旧库：records 含历史遗留的 NOT NULL `mode` 列且已有数据。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE records (
+                id            TEXT PRIMARY KEY,
+                title         TEXT NOT NULL,
+                text          TEXT NOT NULL,
+                mode          TEXT NOT NULL,
+                duration_secs INTEGER NOT NULL,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );
+            INSERT INTO records (id, title, text, mode, duration_secs, created_at, updated_at)
+            VALUES ('r1', '旧标题', '旧正文', 'streaming', 7,
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+
+        // from_conn → init_schema 触发迁移，删除 mode 列。
+        let db = HistoryDb::from_conn(conn).unwrap();
+
+        // 旧数据保留且可正常读取。
+        let got = db.get_record("r1").unwrap().unwrap();
+        assert_eq!(got.text, "旧正文");
+        assert_eq!(got.duration_secs, 7);
+
+        // mode 列已不存在。
+        let has_mode = db
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('records') WHERE name = 'mode'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(!has_mode);
+
+        // 迁移后仍可写入：省略原 NOT NULL `mode` 列的 INSERT 不再失败。
+        let rec = db.create_record().unwrap();
+        db.save_record(&rec.id, "新内容", 3).unwrap();
+        assert_eq!(db.list_records().unwrap().len(), 2);
     }
 
     #[test]
@@ -492,7 +543,7 @@ mod tests {
         let db = mem_db();
         let r = db.create_record().unwrap();
         let long: String = "字".repeat(60);
-        db.save_record(&r.id, &long, "offline", 0).unwrap();
+        db.save_record(&r.id, &long, 0).unwrap();
         let title = db.get_record(&r.id).unwrap().unwrap().title;
         assert_eq!(title.chars().count(), TITLE_MAX_CHARS + 1); // 50 + 省略号
         assert!(title.ends_with('…'));
@@ -514,7 +565,7 @@ mod tests {
 
         // 编辑 a（更新 updated_at）不应改变顺序——仍按 created_at 排。
         std::thread::sleep(std::time::Duration::from_millis(5));
-        db.save_record(&a.id, "later edit", "", 0).unwrap();
+        db.save_record(&a.id, "later edit", 0).unwrap();
         let list2 = db.list_records().unwrap();
         assert_eq!(list2[0].id, b.id);
         assert_eq!(list2[1].id, a.id);
@@ -536,9 +587,8 @@ mod tests {
         let db = mem_db();
         let a = db.create_record().unwrap();
         let b = db.create_record().unwrap();
-        db.save_record(&a.id, "帮我写一段提示词", "offline", 1)
-            .unwrap();
-        db.save_record(&b.id, "今天天气不错", "offline", 1).unwrap();
+        db.save_record(&a.id, "帮我写一段提示词", 1).unwrap();
+        db.save_record(&b.id, "今天天气不错", 1).unwrap();
 
         let hits = db.search_records("提示词").unwrap();
         assert_eq!(hits.len(), 1);
@@ -596,7 +646,7 @@ mod tests {
     fn purge_and_export() {
         let db = mem_db();
         let a = db.create_record().unwrap();
-        db.save_record(&a.id, "内容", "offline", 1).unwrap();
+        db.save_record(&a.id, "内容", 1).unwrap();
         assert_eq!(db.purge_older_than(0).unwrap(), 0); // 不清理
         assert_eq!(db.purge_older_than(30).unwrap(), 0); // 刚更新的不过期
 

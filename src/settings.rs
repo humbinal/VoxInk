@@ -25,6 +25,7 @@ use crate::asr::{AsrError, BackendRegistry};
 use crate::config::VoxInkConfig;
 use crate::i18n::tr;
 use crate::state::TranscriptionMode;
+use crate::theme::BRAND;
 
 const FILETRANS_ID: &str = "aliyun_bailian_filetrans";
 /// 设置面板宽度（px）。固定居中覆盖层，与主窗口尺寸无关；上限取主窗口最小宽度（640）以免溢出。
@@ -538,6 +539,32 @@ impl SettingsView {
             .child(control)
     }
 
+    /// 录音片段圆点图例：解释片段列表中每段前圆点颜色对应的转写模式。
+    /// 与 `app::mode_dot` 保持一致——实时=主色，离线=中性灰。
+    fn segment_legend(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let item = |color, label_key| {
+            h_flex()
+                .items_center()
+                .gap_1p5()
+                .child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(color))
+                .child(tr(label_key))
+        };
+        v_flex()
+            .w_full()
+            .gap_1()
+            .pt_2()
+            .text_xs()
+            .text_color(muted)
+            .child(tr("settings.segment_legend_hint"))
+            .child(
+                h_flex()
+                    .gap_4()
+                    .child(item(BRAND, "mode.streaming"))
+                    .child(item(muted, "mode.offline")),
+            )
+    }
+
     /// 「标签在左、控件在右」字段行（ASR 区用）：右侧控件列定宽，可在其中纵向叠放输入框 + 提示。
     /// 顶部对齐，使带提示的多行控件与标签对齐自然。
     fn field(&self, label_key: &str, right: impl IntoElement) -> impl IntoElement {
@@ -808,6 +835,7 @@ impl Render for SettingsView {
                         "settings.max_seconds",
                         div().w(px(120.)).child(Input::new(&self.max_secs).small()),
                     ))
+                    .child(self.segment_legend(cx))
             })
             // ── 通用 ──
             .when(self.active_tab == SettingsTab::General, |this| {

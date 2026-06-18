@@ -282,17 +282,14 @@ impl VoxInk {
             if rec.text == text {
                 return; // 无改动，不写
             }
-            if let Err(e) = global
-                .0
-                .save_record(&id, &text, &rec.mode, rec.duration_secs)
-            {
+            if let Err(e) = global.0.save_record(&id, &text, rec.duration_secs) {
                 tracing::error!("自动保存失败: {e:#}");
             }
         }
     }
 
-    /// 录制完成后把编辑器正文写回当前记录，并累加本次时长、记录模式。
-    fn persist_after_recording(&mut self, mode: &str, added_secs: u32, cx: &mut Context<Self>) {
+    /// 录制完成后把编辑器正文写回当前记录，并累加本次时长。
+    fn persist_after_recording(&mut self, added_secs: u32, cx: &mut Context<Self>) {
         if self.current_record_id.is_empty() {
             return;
         }
@@ -306,7 +303,7 @@ impl VoxInk {
                 .flatten()
                 .map(|r| r.duration_secs)
                 .unwrap_or(0);
-            if let Err(e) = db.save_record(&id, &text, mode, base + added_secs) {
+            if let Err(e) = db.save_record(&id, &text, base + added_secs) {
                 tracing::error!("保存记录失败: {e:#}");
             }
         }
@@ -563,7 +560,7 @@ impl VoxInk {
         self.refresh_segments(cx);
     }
 
-    /// 重新转写某段音频：离线后端转写 → 追加到正文 + 回填该段文本 + 刷新。
+    /// 重新转写某段音频：离线后端转写 → 追加到正文 + 回填该段文本与模式（圆点转灰）+ 刷新。
     fn retranscribe_segment(
         &mut self,
         seg_id: String,
@@ -594,7 +591,8 @@ impl VoxInk {
                     append_text(&this.editor, &text, window, cx);
                     this.flush_editor_to_record(cx);
                     if let Some(g) = cx.try_global::<GlobalHistory>() {
-                        let _ = g.0.update_segment_text(&seg_id, &text);
+                        // 重转写固定走离线，回填后该段标记为 offline（圆点转灰）。
+                        let _ = g.0.update_segment_transcription(&seg_id, &text, "offline");
                     }
                     this.refresh_records(cx);
                     this.refresh_segments(cx);
@@ -710,7 +708,7 @@ impl VoxInk {
                     Ok(Ok(text)) => {
                         append_text(&this.editor, &text, window, cx);
                         // 追加到当前记录并累加时长（任务 10.3）。
-                        this.persist_after_recording("offline", duration_secs, cx);
+                        this.persist_after_recording(duration_secs, cx);
                         // 录音片段落库（持久化）或清理临时文件。
                         this.finalize_segment(&text, duration_secs, cx);
                         notify(window, "转写完成", cx);
@@ -888,7 +886,7 @@ impl VoxInk {
             Ok(()) => {
                 // 把当前记录（含本次追加）写回 + 累加时长（任务 10.3）。
                 let added = self.streaming_duration_secs;
-                self.persist_after_recording("streaming", added, cx);
+                self.persist_after_recording(added, cx);
                 // 录音片段落库（持久化）或清理临时文件。
                 let seg_text = std::mem::take(&mut self.streaming_text);
                 self.finalize_segment(&seg_text, added, cx);
@@ -1415,13 +1413,6 @@ impl VoxInk {
                             .items_center()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            // 模式以小圆点区分：实时=主色，离线=中性。
-                            .child(
-                                div()
-                                    .size(px(6.))
-                                    .rounded_full()
-                                    .bg(mode_dot(&rec.mode, cx)),
-                            )
                             .child(time_label(&rec.created_at)),
                     ),
             );
@@ -1783,6 +1774,7 @@ impl VoxInk {
             .hover(|s| s.bg(cx.theme().list_hover))
             .child(
                 div()
+                    .flex_shrink_0()
                     .size(px(6.))
                     .rounded_full()
                     .bg(mode_dot(&seg.mode, cx)),
@@ -1868,8 +1860,11 @@ impl Render for VoxInk {
                             .child(
                                 h_flex().size_full().child(self.render_sidebar(cx)).child(
                                     // 右栏：录制控制 + 编辑区 + 底栏。
+                                    // min_w_0：flex_1 默认 min-width:auto 会被长内容（编辑区/片段文字）
+                                    // 撑破窗口，导致右侧按钮被 overflow_hidden 裁切；收敛后宽度随窗口自适应。
                                     v_flex()
                                         .flex_1()
+                                        .min_w_0()
                                         .h_full()
                                         .child(self.render_controls(cx))
                                         .child(self.render_editor(cx))

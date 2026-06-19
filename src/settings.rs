@@ -1122,6 +1122,8 @@ impl Render for SettingsView {
                     .border_1()
                     .border_color(cx.theme().border)
                     .rounded(px(12.))
+                    // 裁剪子元素到圆角内，否则底部页脚/左侧栏的方角背景会盖过圆角边框。
+                    .overflow_hidden()
                     .child(
                         h_flex()
                             .justify_between()

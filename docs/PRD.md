@@ -379,9 +379,9 @@ oss_access_key_id = ""
 oss_access_key_secret = "<encrypted>"     # 加密存储
 
 [shortcuts]
-toggle_recording = "Ctrl+Alt+Space"
-toggle_window = "Ctrl+Alt+V"
-copy_and_paste = "Ctrl+Alt+B"
+toggle_recording = "Ctrl+Shift+Space"
+toggle_window = "Ctrl+Shift+W"
+copy_and_paste = "Ctrl+Shift+V"
 
 [text]
 auto_copy = false
@@ -641,11 +641,15 @@ Microphone ──[PCM]──▶ Audio Capture ──[f32]──▶ Ring Buffer
 
 #### 4.4.1 默认快捷键
 
-| 功能           | Windows/Linux    | macOS              |
-|--------------|------------------|--------------------|
-| 开始/停止录音      | `Ctrl+Alt+Space` | `Cmd+Option+Space` |
-| 唤起/隐藏主窗口     | `Ctrl+Alt+V`     | `Cmd+Option+V`     |
-| 一键复制并粘贴到前台应用 | `Ctrl+Alt+B`     | `Cmd+Option+B`     |
+| 功能           | Windows/Linux      | macOS                |
+|--------------|--------------------|----------------------|
+| 开始/停止录音      | `Ctrl+Shift+Space` | `Cmd+Shift+Space`    |
+| 唤起/隐藏主窗口     | `Ctrl+Shift+W`     | `Cmd+Shift+W`        |
+| 一键复制并粘贴到前台应用 | `Ctrl+Shift+V`     | `Cmd+Shift+V`        |
+
+> 默认采用 `Ctrl+Shift` 系（2026-06-19）：相比 `Ctrl+Alt` 更少被全局工具占用（且不与
+> 部分键盘布局的 AltGr 冲突），键位亦有助记含义——Space=说话、W=Window、V=paste。
+> 用户可在「设置 → 快捷键」中捕获按键直接改键。
 
 #### 4.4.2 快捷键要求
 
@@ -1183,7 +1187,7 @@ ffprobe <生成的 wav 文件>
 **任务 9.2: 平台差异处理**
 - 若 `global-hotkey` 不能满足，分平台降级（Windows `RegisterHotKey`；macOS `NSEvent` 全局监听；Linux X11 `XGrabKey`，Wayland 走 portal 或降级）。见 [§12.6](#126-全局热键的跨平台实现)。
 
-**任务 9.3: 热键自定义 UI**
+**任务 9.3: 热键自定义 UI**（设置面板内，2026-06-19 完成）
 - 显示当前绑定；"重新录制"监听下次组合键；冲突检测并提示。
 
 **任务 9.4: 一键复制并粘贴**
@@ -1193,16 +1197,19 @@ ffprobe <生成的 wav 文件>
 > - 采用 `global-hotkey` 0.8（`HotKey::from_str` 直接解析配置里的 `"Ctrl+Alt+Space"` 等字符串）。
 >   三类热键的绑定取自配置 §2.7 `[shortcuts]`，事件经全局 channel 由 GPUI 前台轮询分发
 >   （与托盘同机制，Windows 上 `WM_HOTKEY` 由 gpui 主线程消息循环泵送）。代码：`src/hotkey/mod.rs`。
-> - **任务 9.3「热键自定义 UI」属设置面板（M11），本里程碑暂不实现重录 UI**——与 M5/M7 处理
->   "设置面板尚未存在"的方式一致。当前阶段用户经编辑 `config.toml` 的 `[shortcuts]` 自定义、重启生效；
->   **注册期冲突检测已实现**：注册失败（多为与其它应用冲突）会汇总弹出友好提示。完整重录 UI 留待 M11。
+> - **任务 9.3「热键自定义 UI」已在设置面板「快捷键」区完成（2026-06-19）**：每条快捷键为可点击
+>   的「键帽」，点击进入捕获态，按下「修饰键 + 主键」即写入并**即时重注册**（`hotkey::apply_shortcuts`
+>   先注销旧键再注册新键、返回冲突项）、落盘；Esc 取消，另有「恢复默认」。捕获期间临时 `hotkey::suspend`
+>   注销全部热键，否则全局热键会被 OS 截获、按键传不到窗口。改键/启动两处都做冲突检测并弹友好提示。
+>   `GlobalHotkeys` 现持有 `manager + 已注册 id→动作映射`，轮询循环每次事件现取映射以支持热更新。
+>   按键→快捷键字符串的转换见 `hotkey::accelerator_from_keystroke`（含单测）。
 > - **任务 9.4 粘贴模拟**：写入剪贴板后用 Win32 `SendInput` 模拟 Ctrl+V（先释放可能仍按住的
 >   Alt/Shift/Win/Ctrl 修饰键，再发干净的 Ctrl+V）。非 Windows 平台暂为降级（不模拟粘贴），后续补。
 > - 新增依赖：`global-hotkey`（§1.4）；Windows target 增加 `Win32_UI_Input_KeyboardAndMouse` feature（SendInput）。
 
-> 🔧 **人工操作（验证 M9）**：在任意前台应用下按默认热键验证——`Ctrl+Alt+Space`（开始/停止录音）、
-> `Ctrl+Alt+V`（唤起/隐藏窗口）、`Ctrl+Alt+B`（复制并粘贴到前台应用）。若某热键被其它应用占用，
-> 启动时会弹冲突提示；改 `config.toml` 的 `[shortcuts]` 后重启即可。
+> 🔧 **人工操作（验证 M9）**：在任意前台应用下按默认热键验证——`Ctrl+Shift+Space`（开始/停止录音）、
+> `Ctrl+Shift+W`（唤起/隐藏窗口）、`Ctrl+Shift+V`（复制并粘贴到前台应用）。若某热键被其它应用占用，
+> 启动时会弹冲突提示；在「设置 → 快捷键」中点击对应键帽、按下新组合即可改键（即时生效，无需重启）。
 
 #### 验收标准
 - [ ] 任意前台应用下，录音热键能开始/停止录音

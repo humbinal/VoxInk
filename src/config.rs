@@ -205,9 +205,11 @@ impl Default for AsrSettings {
 impl Default for ShortcutsConfig {
     fn default() -> Self {
         Self {
-            toggle_recording: "Ctrl+Alt+Space".to_string(),
-            toggle_window: "Ctrl+Alt+V".to_string(),
-            copy_and_paste: "Ctrl+Alt+B".to_string(),
+            // 默认采用 Ctrl+Shift 系（2026-06-19）：相比 Ctrl+Alt 更少被全局工具占用，
+            // 且键位有助记含义——Space=说话、W=Window、V=paste。可在设置面板内捕获改键。
+            toggle_recording: "Ctrl+Shift+Space".to_string(),
+            toggle_window: "Ctrl+Shift+W".to_string(),
+            copy_and_paste: "Ctrl+Shift+V".to_string(),
         }
     }
 }

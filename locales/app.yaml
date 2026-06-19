@@ -205,8 +205,20 @@ shortcut.copy_paste:
   zh-CN: 复制并粘贴到前台
   en: Copy & paste to foreground
 settings.shortcuts_hint:
-  zh-CN: （编辑 config.toml 的 [shortcuts] 后重启生效）
-  en: (Edit [shortcuts] in config.toml, restart to apply)
+  zh-CN: 点击快捷键后按下新组合即可修改（需含 Ctrl/Alt/Shift 等修饰键；Esc 取消）
+  en: Click a shortcut then press a new combo (must include Ctrl/Alt/Shift; Esc to cancel)
+settings.shortcut_capturing:
+  zh-CN: 按下新快捷键…
+  en: Press shortcut…
+settings.shortcuts_reset:
+  zh-CN: 恢复默认
+  en: Restore defaults
+settings.shortcut_updated:
+  zh-CN: 快捷键已更新
+  en: Shortcut updated
+settings.shortcut_conflict:
+  zh-CN: 快捷键注册失败（可能与其它应用冲突）
+  en: Failed to register shortcut (may conflict with another app)
 settings.section.data:
   zh-CN: 数据
   en: Data

@@ -7,8 +7,8 @@
 //! 离线选「大文件」后端时额外显示 OSS 参数。下拉为自绘内联展开列表（避免浮层裁剪/复杂依赖）。
 
 use gpui::{
-    ClickEvent, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, ScrollHandle,
-    Styled, Window, div, prelude::*, px, rgba,
+    ClickEvent, Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::*, px, rgba,
 };
 use gpui_component::{
     ActiveTheme, IconName, Sizable,
@@ -22,7 +22,7 @@ use gpui_component::{
 
 use crate::app::{GlobalConfig, GlobalTokioHandle, friendly_asr_error, notify, runtime_asr_config};
 use crate::asr::{AsrError, BackendRegistry};
-use crate::config::VoxInkConfig;
+use crate::config::{ShortcutsConfig, VoxInkConfig};
 use crate::i18n::tr;
 use crate::state::TranscriptionMode;
 use crate::theme::BRAND;
@@ -44,6 +44,33 @@ enum Dropdown {
     None,
     Streaming,
     Offline,
+}
+
+/// 可改键的快捷键槽位。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShortcutSlot {
+    Recording,
+    Window,
+    Paste,
+}
+
+impl ShortcutSlot {
+    /// 行标题 locale key。
+    fn label_key(self) -> &'static str {
+        match self {
+            ShortcutSlot::Recording => "shortcut.toggle_recording",
+            ShortcutSlot::Window => "shortcut.toggle_window",
+            ShortcutSlot::Paste => "shortcut.copy_paste",
+        }
+    }
+
+    fn set(self, s: &mut ShortcutsConfig, v: String) {
+        match self {
+            ShortcutSlot::Recording => s.toggle_recording = v,
+            ShortcutSlot::Window => s.toggle_window = v,
+            ShortcutSlot::Paste => s.copy_and_paste = v,
+        }
+    }
 }
 
 /// 设置分类标签（左侧栏）。
@@ -93,6 +120,10 @@ pub struct SettingsView {
     active_tab: SettingsTab,
     /// 内容区滚动句柄（驱动可见滚动条）。
     scroll: ScrollHandle,
+    /// 改键捕获用焦点句柄（聚焦后由 on_key_down 接收按键）。
+    capture_focus: FocusHandle,
+    /// 正在捕获按键的槽位（Some 表示改键进行中，此时全局热键已被 suspend）。
+    capturing: Option<ShortcutSlot>,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -121,6 +152,8 @@ impl SettingsView {
             audio_usage_bytes: 0,
             active_tab: SettingsTab::Asr,
             scroll: ScrollHandle::new(),
+            capture_focus: cx.focus_handle(),
+            capturing: None,
         }
     }
 
@@ -436,15 +469,86 @@ impl SettingsView {
     /// 关闭设置面板（右上角 X）。即时生效项（开关/主题等）已落入内存配置，
     /// 退出应用时统一持久化；未点「保存」的输入框文本不写盘。
     fn on_close(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // 若正在改键，关闭前先恢复全局热键（否则它们会一直处于注销状态）。
+        self.cancel_capture(cx);
         cx.emit(SettingsEvent::Closed);
     }
 
-    /// 当前标签是否含可保存配置（关于/快捷键为只读）。
+    /// 当前标签底部是否显示「保存」按钮（关于=只读；快捷键=改键即时生效，无需保存）。
     fn tab_is_editable(&self) -> bool {
         matches!(
             self.active_tab,
             SettingsTab::Asr | SettingsTab::Recording | SettingsTab::General | SettingsTab::Data
         )
+    }
+
+    // ───────────────────────────── 快捷键改键（捕获按键）─────────────────────────────
+
+    /// 开始捕获某槽位的新按键：先 suspend 全局热键（否则按键被 OS 截获、传不到窗口），
+    /// 再聚焦捕获句柄，由 [`Self::on_capture_key`] 接收下一个按键组合。
+    fn begin_capture(&mut self, slot: ShortcutSlot, window: &mut Window, cx: &mut Context<Self>) {
+        crate::hotkey::suspend(cx);
+        self.capturing = Some(slot);
+        window.focus(&self.capture_focus, cx);
+        cx.notify();
+    }
+
+    /// 取消捕获并用当前配置恢复（重注册）全局热键。
+    fn cancel_capture(&mut self, cx: &mut Context<Self>) {
+        if self.capturing.take().is_some() {
+            if let Some(cfg) = cx.try_global::<GlobalConfig>().map(|g| g.0.clone()) {
+                crate::hotkey::apply_shortcuts(&cfg.shortcuts, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// 捕获到一次按键：Esc 取消；合法组合则写入配置、落盘并即时重注册（含冲突提示）；
+    /// 纯修饰键/不支持的键忽略（继续等待有效组合）。
+    fn on_capture_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slot) = self.capturing else { return };
+        let ks = &ev.keystroke;
+        let m = &ks.modifiers;
+        // 裸 Esc 取消。
+        if ks.key == "escape" && !(m.control || m.alt || m.shift || m.platform) {
+            self.cancel_capture(cx);
+            return;
+        }
+        let Some(spec) = crate::hotkey::accelerator_from_keystroke(ks) else {
+            return; // 等待「修饰键 + 主键」的有效组合
+        };
+        self.update_config(cx, |c| slot.set(&mut c.shortcuts, spec.clone()));
+        self.capturing = None;
+        self.apply_shortcuts_and_report(window, cx);
+        cx.notify();
+    }
+
+    /// 「恢复默认快捷键」：重置三键为默认并即时生效。
+    fn on_reset_shortcuts(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.capturing = None;
+        self.update_config(cx, |c| c.shortcuts = ShortcutsConfig::default());
+        self.apply_shortcuts_and_report(window, cx);
+        cx.notify();
+    }
+
+    /// 改键后：落盘 + 重注册全部热键，并按结果给出提示。
+    fn apply_shortcuts_and_report(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cfg) = cx.try_global::<GlobalConfig>().map(|g| g.0.clone()) else {
+            return;
+        };
+        if let Err(e) = cfg.save() {
+            tracing::error!("保存快捷键失败: {e:#}");
+        }
+        let conflicts = crate::hotkey::apply_shortcuts(&cfg.shortcuts, cx);
+        if conflicts.is_empty() {
+            notify(window, tr("settings.shortcut_updated"), cx);
+        } else {
+            notify(
+                window,
+                format!("{}：{}", tr("settings.shortcut_conflict"), conflicts.join("、")),
+                cx,
+            );
+        }
     }
 
     fn set_theme(&mut self, theme: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -488,6 +592,8 @@ impl SettingsView {
                 .cursor_pointer()
                 .child(tr(key))
                 .on_click(cx.listener(move |this, _, _w, cx| {
+                    // 离开当前标签时若正在改键，先恢复全局热键。
+                    this.cancel_capture(cx);
                     this.active_tab = tab;
                     this.open_dropdown = Dropdown::None;
                     cx.notify();
@@ -883,24 +989,7 @@ impl Render for SettingsView {
             })
             // ── 快捷键 ──
             .when(self.active_tab == SettingsTab::Shortcuts, |this| {
-                this.child(self.shortcut_row(
-                    "shortcut.toggle_recording",
-                    &cfg.shortcuts.toggle_recording,
-                    cx,
-                ))
-                .child(self.shortcut_row(
-                    "shortcut.toggle_window",
-                    &cfg.shortcuts.toggle_window,
-                    cx,
-                ))
-                .child(self.shortcut_row("shortcut.copy_paste", &cfg.shortcuts.copy_and_paste, cx))
-                .child(
-                    div()
-                        .pt_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr("settings.shortcuts_hint")),
-                )
+                this.child(self.render_shortcuts(&cfg, cx))
             })
             // ── 数据 ──
             .when(self.active_tab == SettingsTab::Data, |this| {
@@ -1187,21 +1276,77 @@ impl SettingsView {
             )
     }
 
-    fn shortcut_row(&self, label_key: &str, binding: &str, cx: &Context<Self>) -> impl IntoElement {
+    /// 快捷键改键区：三行可点击改键的「键帽」+ 提示 + 恢复默认。
+    /// 容器 track_focus + on_key_down，捕获期间聚焦它以接收按键。
+    fn render_shortcuts(&self, cfg: &VoxInkConfig, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = &cfg.shortcuts;
+        v_flex()
+            .id("shortcuts-pane")
+            .track_focus(&self.capture_focus)
+            .on_key_down(cx.listener(Self::on_capture_key))
+            .w_full()
+            .gap_1()
+            .child(self.shortcut_row(ShortcutSlot::Recording, &s.toggle_recording, cx))
+            .child(self.shortcut_row(ShortcutSlot::Window, &s.toggle_window, cx))
+            .child(self.shortcut_row(ShortcutSlot::Paste, &s.copy_and_paste, cx))
+            .child(
+                div()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr("settings.shortcuts_hint")),
+            )
+            .child(
+                div().pt_2().child(
+                    Button::new("shortcut-reset")
+                        .outline()
+                        .small()
+                        .label(tr("settings.shortcuts_reset"))
+                        .on_click(cx.listener(Self::on_reset_shortcuts)),
+                ),
+            )
+    }
+
+    /// 单行：标题 + 可点击的快捷键「键帽」（点击进入捕获，捕获中显示提示，高亮边框）。
+    fn shortcut_row(
+        &self,
+        slot: ShortcutSlot,
+        binding: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let capturing = self.capturing == Some(slot);
+        let display = if capturing {
+            tr("settings.shortcut_capturing")
+        } else if binding.trim().is_empty() {
+            "—".to_string()
+        } else {
+            binding.to_string()
+        };
         h_flex()
             .w_full()
             .justify_between()
             .items_center()
             .py_1()
-            .child(div().child(tr(label_key)))
+            .child(div().child(tr(slot.label_key())))
             .child(
                 div()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(4.))
+                    .id(gpui::SharedString::from(format!("sc-cap-{}", slot.label_key())))
+                    .flex()
+                    .justify_center()
+                    .min_w(px(150.))
+                    .px_3()
+                    .py_1()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(if capturing { BRAND } else { cx.theme().border })
                     .bg(cx.theme().muted)
                     .text_xs()
-                    .child(binding.to_string()),
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(BRAND))
+                    .child(display)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.begin_capture(slot, window, cx)
+                    })),
             )
     }
 

@@ -23,11 +23,13 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     notification::Notification,
-    switch::Switch,
     v_flex,
 };
 
-use crate::theme::{BRAND, DANGER, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDING, brand_tint};
+use crate::theme::{
+    BRAND, DANGER, MODE_OFFLINE, MODE_STREAMING, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDING,
+    brand_tint,
+};
 
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
@@ -1759,44 +1761,57 @@ impl VoxInk {
             })
     }
 
-    /// 转录模式切换（离线 ⟷ 实时）。离线/实时是对等的二选一，无"启用/禁用"语义，
-    /// 故 Switch 不用品牌高亮色——两态统一用系统中性轨道色（`theme.switch`），仅靠**滑块位置**
-    /// 表示当前选择；两侧模式名同色，当前项仅以字重略作区分。前缀「转录模式」点明用途。
-    /// 录音中禁用但仍显示当前模式。
+    /// 转录模式切换（离线 ⟷ 实时）。自绘开关：两态各用一种**明亮且对比**的轨道色
+    /// （离线=蓝 / 实时=琥珀）区分模式，无启用/禁用语义；当前选中模式的**文字用品牌主色**高亮。
+    /// 前缀「转录模式」点明用途。录音中禁用但仍显示当前模式。
     fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
         let disabled = self.state.recording_state != RecordingState::Idle;
-        let fg = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
-        // 侧标签：两态同色（前景色），当前项仅以中等字重区分，不做颜色高亮。
+        // 侧标签：当前项用品牌主色 + 中等字重；非当前用浅色。
         let side_label = |text: String, on: bool| {
             div()
                 .text_sm()
-                .text_color(fg)
+                .text_color(if on { BRAND } else { muted })
                 .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                 .child(text)
         };
+
+        // 轨道 40×22，滑块 16，内边距 3 → 左/右端位置。
+        let track_color = if is_streaming { MODE_STREAMING } else { MODE_OFFLINE };
+        let mut sw = div()
+            .id("mode-switch")
+            .w(px(40.))
+            .h(px(22.))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(track_color)
+            .relative()
+            .child(
+                div()
+                    .absolute()
+                    .top(px(3.))
+                    .left(px(if is_streaming { 21. } else { 3. }))
+                    .size(px(16.))
+                    .rounded_full()
+                    .bg(white())
+                    .shadow_sm(),
+            );
+        if disabled {
+            sw = sw.opacity(0.5);
+        } else {
+            sw = sw
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _w, cx| this.toggle_mode(cx)));
+        }
+
         h_flex()
             .flex_shrink_0()
             .items_center()
             .gap_2()
             .child(div().text_sm().text_color(muted).child(tr("mode.title")))
             .child(side_label(tr("mode.offline"), !is_streaming))
-            .child(
-                // checked = 实时（滑块在右）；unchecked = 离线。color = 中性轨道色，使两态无色差。
-                Switch::new("mode-switch")
-                    .checked(is_streaming)
-                    .color(cx.theme().switch)
-                    .disabled(disabled)
-                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
-                        let mode = if *checked {
-                            TranscriptionMode::Streaming
-                        } else {
-                            TranscriptionMode::Offline
-                        };
-                        this.on_select_mode(mode, cx);
-                    })),
-            )
+            .child(sw)
             .child(side_label(tr("mode.streaming"), is_streaming))
     }
 

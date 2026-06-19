@@ -583,7 +583,9 @@ impl SettingsView {
     // ───────────────────────────── 渲染辅助 ─────────────────────────────
 
     /// 左侧分类标签栏（竖排）。
-    fn render_tab_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `round_bl`：本栏是否处于面板底部边缘（无底部页脚时为真），需把左下角倒成与面板一致的圆角，
+    /// 否则方角的 sidebar 背景会盖掉面板的圆角边框（GPUI 的 overflow_hidden 只做矩形裁剪，不裁圆角）。
+    fn render_tab_rail(&self, round_bl: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rail = v_flex()
             .w(px(132.))
             .flex_shrink_0()
@@ -593,7 +595,8 @@ impl SettingsView {
             .py_2()
             .border_r_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar);
+            .bg(cx.theme().sidebar)
+            .when(round_bl, |r| r.rounded_bl(px(11.)));
         for (tab, key) in SettingsTab::ALL {
             let active = self.active_tab == tab;
             let mut item = div()
@@ -1137,7 +1140,8 @@ impl Render for SettingsView {
                     .border_1()
                     .border_color(cx.theme().border)
                     .rounded(px(12.))
-                    // 裁剪子元素到圆角内，否则底部页脚/左侧栏的方角背景会盖过圆角边框。
+                    // 裁掉超出面板的滚动内容。注意：GPUI 的 content mask 只做矩形裁剪、不裁圆角，
+                    // 故底部页脚/左侧栏的圆角需各自单独倒（见 footer.rounded_b / rail round_bl）。
                     .overflow_hidden()
                     .child(
                         h_flex()
@@ -1167,7 +1171,7 @@ impl Render for SettingsView {
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .child(self.render_tab_rail(cx))
+                            .child(self.render_tab_rail(!self.tab_is_editable(), cx))
                             .child(
                                 div()
                                     .relative()
@@ -1197,6 +1201,9 @@ impl Render for SettingsView {
                                 .border_t_1()
                                 .border_color(cx.theme().border)
                                 .bg(cx.theme().background)
+                                // 页脚是面板底部边缘元素，倒底部圆角与面板一致，
+                                // 否则方角背景会盖掉面板圆角（content mask 不裁圆角）。
+                                .rounded_b(px(11.))
                                 .child(
                                     Button::new("settings-save")
                                         .primary()

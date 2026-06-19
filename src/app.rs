@@ -2396,7 +2396,7 @@ impl RecordGlyph {
 }
 
 /// 波形竖条最大高度（px）。容器与 [`level_bar_height`] 的上限须一致以免裁切。
-const WAVE_MAX_PX: f32 = 28.0;
+const WAVE_MAX_PX: f32 = 34.0;
 /// 波形竖条静音时的最小高度（px）——保留一条细基线，视觉上"在听"。
 const WAVE_MIN_PX: f32 = 2.0;
 

@@ -194,10 +194,11 @@ impl MicProbe {
         let stop = stop_flag.clone();
         let worker = std::thread::spawn(move || {
             let mut chunk = vec![0f32; 4096];
+            let mut env = super::LevelEnvelope::new();
             loop {
                 let n = cons.pop_slice(&mut chunk);
                 if n > 0 {
-                    super::store_level(&level, super::rms_amplitude(&chunk[..n]));
+                    super::store_level(&level, env.push(&chunk[..n]));
                 } else if stop.load(Ordering::SeqCst) {
                     break;
                 } else {
@@ -294,13 +295,14 @@ fn spawn_worker(
         let mut mono: Vec<f32> = Vec::with_capacity(4096);
         let mut pcm: Vec<i16> = Vec::with_capacity(4096);
         let mut chunk = vec![0f32; 4096];
+        let mut env = super::LevelEnvelope::new();
         let mut total: u64 = 0;
 
         loop {
             let n = cons.pop_slice(&mut chunk);
             if n > 0 {
-                // 更新实时电平（取本次采集块 RMS），供 UI 绘制波形。
-                super::store_level(&level, super::rms_amplitude(&chunk[..n]));
+                // 更新实时电平（RMS 经包络跟随：瞬时起、缓慢落），供 UI 绘制波形。
+                super::store_level(&level, env.push(&chunk[..n]));
                 interleaved.extend_from_slice(&chunk[..n]);
                 total += drain_frames(
                     &mut interleaved,

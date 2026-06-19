@@ -96,12 +96,13 @@ fn spawn_stream_worker(
         let mut pcm: Vec<i16> = Vec::with_capacity(4096);
         let mut frame_bytes: Vec<u8> = Vec::with_capacity(FRAME_BYTES * 2);
         let mut chunk = vec![0f32; 4096];
+        let mut env = super::LevelEnvelope::new();
         let mut total: u64 = 0;
 
         loop {
             let n = cons.pop_slice(&mut chunk);
             if n > 0 {
-                super::store_level(&level, super::rms_amplitude(&chunk[..n]));
+                super::store_level(&level, env.push(&chunk[..n]));
                 interleaved.extend_from_slice(&chunk[..n]);
                 pcm.clear();
                 downmix_resample(

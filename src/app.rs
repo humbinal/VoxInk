@@ -1821,7 +1821,7 @@ impl VoxInk {
             .child(
                 div()
                     .flex_1()
-                    .h(px(20.))
+                    .h(px(WAVE_MAX_PX))
                     .flex()
                     .items_center()
                     .overflow_hidden()
@@ -2395,22 +2395,29 @@ impl RecordGlyph {
     }
 }
 
-/// 电平（0..1 RMS 幅度）→ 波形竖条高度（px）。
+/// 波形竖条最大高度（px）。容器与 [`level_bar_height`] 的上限须一致以免裁切。
+const WAVE_MAX_PX: f32 = 28.0;
+/// 波形竖条静音时的最小高度（px）——保留一条细基线，视觉上"在听"。
+const WAVE_MIN_PX: f32 = 2.0;
+
+/// 电平（0..1 幅度包络）→ 波形竖条高度（px）。
 ///
-/// dBFS 对数映射 + **gamma 压缩**，让"满格"只在声音特别大（逼近 0dBFS）时出现：
-/// 先把 [-50dB, 0dB] 线性归一化，再做 `^GAMMA`（GAMMA>1 把中段整体压低）。
-/// 经验值：普通说话(RMS≈-20dB)≈0.33、偏大(≈-10dB)≈0.64、很大(≈-6dB)≈0.76、削顶(0dB)=1.0。
-/// 想更灵敏（条更高）→ 调小 GAMMA 或抬高 MIN_DB；想更难满 → 调大 GAMMA。
+/// **dBFS 对数刻度**（人耳对响度近似对数感知）映射到 [WAVE_MIN_PX, WAVE_MAX_PX]：
+/// 先把 [MIN_DB, 0dB] 线性归一化，再做轻微 `^GAMMA`（GAMMA<1，**扩张**中低段，让常见说话音量
+/// 也明显起伏）。配合采集端的峰值包络（[`audio::LevelEnvelope`]），对音量变化的感知更敏感。
+/// 经验值：极轻(≈-35dB)≈0.21、轻声(≈-30dB)≈0.34、普通说话(≈-20dB)≈0.58、
+/// 偏大(≈-10dB)≈0.79、很大(≈-6dB)≈0.88、削顶(0dB)=1.0。
+/// 想更灵敏 → 调小 GAMMA 或抬高 MIN_DB；想更难满 → 调大 GAMMA。
 fn level_bar_height(level: f32) -> f32 {
-    const MIN_DB: f32 = -50.0;
-    const GAMMA: f32 = 2.2;
+    const MIN_DB: f32 = -42.0;
+    const GAMMA: f32 = 0.85;
     let norm = if level <= 1e-5 {
         0.0
     } else {
         let lin = ((20.0 * level.log10() - MIN_DB) / -MIN_DB).clamp(0.0, 1.0);
         lin.powf(GAMMA)
     };
-    3.0 + norm * 27.0
+    WAVE_MIN_PX + norm * (WAVE_MAX_PX - WAVE_MIN_PX)
 }
 
 /// 秒数格式化为 `MM:SS`。

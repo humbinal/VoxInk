@@ -36,12 +36,40 @@ pub(crate) struct OpenCapture {
     pub channels: u16,
 }
 
-/// 探测默认输入设备、建环形缓冲、构建并启动采集流。
-pub(crate) fn open_capture() -> Result<OpenCapture, AudioError> {
+/// 列出当前可用的输入设备名（供 UI 麦克风选择；查询较重，仅在需要时调用，勿每帧调）。
+pub fn list_input_devices() -> Vec<String> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or(AudioError::NoInputDevice)?;
+    match host.input_devices() {
+        Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
+        Err(e) => {
+            tracing::warn!("枚举输入设备失败: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// 按首选名选择输入设备：名字非空且能匹配则用之，否则回退系统默认（并告警）。
+fn select_input_device(
+    host: &cpal::Host,
+    preferred: Option<&str>,
+) -> Result<cpal::Device, AudioError> {
+    if let Some(name) = preferred.filter(|s| !s.is_empty()) {
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if d.name().map(|n| n == name).unwrap_or(false) {
+                    return Ok(d);
+                }
+            }
+        }
+        tracing::warn!("指定麦克风 '{name}' 未找到，回退系统默认输入设备");
+    }
+    host.default_input_device().ok_or(AudioError::NoInputDevice)
+}
+
+/// 探测输入设备（`preferred` 指定则用之、否则系统默认）、建环形缓冲、构建并启动采集流。
+pub(crate) fn open_capture(preferred: Option<&str>) -> Result<OpenCapture, AudioError> {
+    let host = cpal::default_host();
+    let device = select_input_device(&host, preferred)?;
     let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
 
     let supported = device
@@ -79,10 +107,15 @@ pub(crate) fn open_capture() -> Result<OpenCapture, AudioError> {
 }
 
 impl Recorder {
-    /// 探测默认输入设备、构建采集流并开始录音（WAV 写入 `wav_path`）。
-    /// 路径由调用方决定（持久化时为记录目录，否则为临时目录）；`level` 供 UI 绘制实时波形。
-    pub fn start(wav_path: PathBuf, level: LevelMeter) -> Result<Self, AudioError> {
-        let cap = open_capture()?;
+    /// 探测输入设备、构建采集流并开始录音（WAV 写入 `wav_path`）。
+    /// `device` 指定首选麦克风名（None/空 = 系统默认）；路径由调用方决定（持久化时为记录目录，
+    /// 否则为临时目录）；`level` 供 UI 绘制实时波形。
+    pub fn start(
+        wav_path: PathBuf,
+        level: LevelMeter,
+        device: Option<String>,
+    ) -> Result<Self, AudioError> {
+        let cap = open_capture(device.as_deref())?;
         let writer = create_writer(&wav_path)?;
         let resampler = MonoResampler::new(cap.input_rate)?;
 
@@ -140,6 +173,57 @@ impl Recorder {
 impl Drop for Recorder {
     fn drop(&mut self) {
         // 未经 stop() 直接丢弃（如录音中退出）时，通知 worker 结束以免线程泄漏。
+        self.stop_flag.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 麦克风可用性探测：打开设备后仅把实时电平写入 `LevelMeter`（不重采样、不写 WAV），
+/// 供「测试麦克风」时的实时电平显示。`stop()` 或 drop 即结束。
+pub struct MicProbe {
+    stream: cpal::Stream,
+    stop_flag: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl MicProbe {
+    /// 打开 `device`（None/空 = 系统默认）并开始把电平写入 `level`。失败返回 [`AudioError`]。
+    pub fn start(device: Option<String>, level: LevelMeter) -> Result<Self, AudioError> {
+        let cap = open_capture(device.as_deref())?;
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut cons = cap.cons;
+        let stop = stop_flag.clone();
+        let worker = std::thread::spawn(move || {
+            let mut chunk = vec![0f32; 4096];
+            loop {
+                let n = cons.pop_slice(&mut chunk);
+                if n > 0 {
+                    super::store_level(&level, super::rms_amplitude(&chunk[..n]));
+                } else if stop.load(Ordering::SeqCst) {
+                    break;
+                } else {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        });
+        Ok(Self {
+            stream: cap.stream,
+            stop_flag,
+            worker: Some(worker),
+        })
+    }
+
+    /// 停止探测（暂停采集流并结束 worker）。
+    pub fn stop(mut self) {
+        let _ = self.stream.pause();
+        self.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for MicProbe {
+    fn drop(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
     }
 }

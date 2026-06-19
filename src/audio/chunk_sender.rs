@@ -33,13 +33,14 @@ pub struct StreamingCapture {
 
 impl StreamingCapture {
     /// 启动流式采集：PCM 100ms 帧经 `audio_tx` 发送，同时写本地 WAV（`wav_path`，回退/留存用）。
-    /// `level` 供 UI 绘制实时波形。
+    /// `device` 指定首选麦克风名（None/空 = 系统默认）；`level` 供 UI 绘制实时波形。
     pub fn start(
         audio_tx: Sender<Vec<u8>>,
         wav_path: PathBuf,
         level: LevelMeter,
+        device: Option<String>,
     ) -> Result<Self, AudioError> {
-        let cap = open_capture()?;
+        let cap = open_capture(device.as_deref())?;
         let writer = create_writer(&wav_path)?;
         let resampler = MonoResampler::new(cap.input_rate)?;
         let stop_flag = Arc::new(AtomicBool::new(false));

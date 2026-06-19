@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-pub use capture::Recorder;
+pub use capture::{MicProbe, Recorder, list_input_devices};
 pub use chunk_sender::StreamingCapture;
 
 /// ASR 统一要求的目标采样率（§4.1）。

@@ -28,6 +28,7 @@ pub struct VoxInkConfig {
     pub version: u32,
     pub general: GeneralConfig,
     pub asr: AsrSettings,
+    pub audio: AudioConfig,
     pub shortcuts: ShortcutsConfig,
     pub text: TextConfig,
     pub storage: StorageConfig,
@@ -94,6 +95,15 @@ impl AsrSettings {
     }
 }
 
+/// 音频输入设置（§2.7 的 `[audio]` 段，2026-06-19）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    /// 首选麦克风设备名（cpal 设备名）。留空 = 跟随系统默认输入设备。
+    /// 设备不存在时（如已拔出）运行期回退默认设备。
+    pub input_device: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShortcutsConfig {
@@ -158,6 +168,7 @@ impl Default for VoxInkConfig {
             version: CONFIG_VERSION,
             general: GeneralConfig::default(),
             asr: AsrSettings::default(),
+            audio: AudioConfig::default(),
             shortcuts: ShortcutsConfig::default(),
             text: TextConfig::default(),
             storage: StorageConfig::default(),

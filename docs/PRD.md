@@ -378,6 +378,11 @@ oss_bucket = ""
 oss_access_key_id = ""
 oss_access_key_secret = "<encrypted>"     # 加密存储
 
+# 音频输入（2026-06-19）。
+[audio]
+input_device = ""              # 首选麦克风设备名（cpal 名）；留空=跟随系统默认输入设备
+                               # 设备不存在（如已拔出）时运行期回退默认；可在主界面麦克风栏切换
+
 [shortcuts]
 toggle_recording = "Ctrl+Shift+Space"
 toggle_window = "Ctrl+Shift+W"
@@ -964,8 +969,14 @@ cargo run
 #### 🤖 Agent 任务清单
 
 **任务 3.1: 音频设备探测（`src/audio/capture.rs`）**
-- 用 `cpal` 枚举录音设备，自动选择系统默认输入设备。
+- 用 `cpal` 枚举录音设备；默认跟随系统默认输入设备，亦支持按名指定（`[audio].input_device`）。
 - 设备不可用时返回明确错误类型，UI 显示友好提示。
+
+> 📝 **麦克风管理（2026-06-19）**：主界面录制区常驻「麦克风栏」——当前设备 + 下拉切换 + 「测试」。
+> 设计为高频可见操作，故置于主页而非设置面板。`audio::list_input_devices()` 枚举设备（打开下拉时刷新，
+> 不每帧查询）；选定写入 `[audio].input_device`（空=系统默认），录制时 `open_capture(preferred)`
+> 按名选设备、找不到回退默认。`audio::MicProbe` 为轻量探测（只打开流喂 `LevelMeter`、不写 WAV），
+> 「测试」时实时显示电平条约 1.7s，据峰值 RMS 判定「正常/无信号」。录制中禁用切换与测试。
 
 **任务 3.2: 环形缓冲区（`src/audio/buffer.rs`）**
 - 用 `ringbuf` 实现单生产者（音频回调）单消费者（Tokio 任务）的无锁环形缓冲区。

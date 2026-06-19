@@ -30,7 +30,9 @@ use crate::theme::{BRAND, DANGER, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDI
 
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
-use crate::audio::{AudioError, LevelMeter, Recorder, StreamingCapture, load_level};
+use crate::audio::{
+    AudioError, LevelMeter, MicProbe, Recorder, StreamingCapture, list_input_devices, load_level,
+};
 use crate::config::VoxInkConfig;
 use crate::history::GlobalHistory;
 use crate::history::db::{Record, Segment};
@@ -121,6 +123,14 @@ pub struct VoxInk {
     level_meter: LevelMeter,
     /// 近期电平历史（用于绘制滚动波形）。
     levels: Vec<f32>,
+    /// 缓存的可用麦克风设备名（打开下拉时刷新；不每帧查询）。
+    mic_devices: Vec<String>,
+    /// 麦克风下拉是否展开。
+    mic_dropdown_open: bool,
+    /// 是否正在做麦克风可用性测试。
+    mic_testing: bool,
+    /// 测试期间的探测句柄（保持采集流存活；结束/drop 即停止）。
+    mic_probe: Option<MicProbe>,
     /// 自动保存防抖代际计数（仅最新一次定时器生效）。
     autosave_gen: u64,
     /// 当前记录的录音片段列表（随记录切换/录制/删除刷新）。
@@ -244,6 +254,10 @@ impl VoxInk {
             active_recording: None,
             level_meter: Arc::new(AtomicU32::new(0)),
             levels: Vec::new(),
+            mic_devices: list_input_devices(),
+            mic_dropdown_open: false,
+            mic_testing: false,
+            mic_probe: None,
             segments,
             show_segments: false,
             autosave_gen: 0,
@@ -442,6 +456,127 @@ impl VoxInk {
             .unwrap_or(600)
     }
 
+    // ───────────────────────────── 麦克风选择 / 测试（2026-06-19）─────────────────────────────
+
+    /// 当前配置的首选麦克风名（空 = 系统默认 → None）。
+    fn configured_input_device(&self, cx: &Context<Self>) -> Option<String> {
+        cx.try_global::<GlobalConfig>()
+            .map(|g| g.0.audio.input_device.clone())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// 麦克风栏显示的当前设备名（空 → "系统默认"）。
+    fn current_mic_label(&self, cx: &Context<Self>) -> String {
+        match self.configured_input_device(cx) {
+            Some(name) => name,
+            None => tr("mic.default"),
+        }
+    }
+
+    /// 展开/收起麦克风下拉（录制中禁止切换）；展开时刷新设备列表。
+    fn on_toggle_mic_dropdown(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_idle() {
+            return;
+        }
+        self.mic_dropdown_open = !self.mic_dropdown_open;
+        if self.mic_dropdown_open {
+            self.mic_devices = list_input_devices();
+        }
+        cx.notify();
+    }
+
+    /// 选择麦克风（空串 = 系统默认），写入配置（退出时落盘）。
+    fn select_mic(&mut self, name: String, cx: &mut Context<Self>) {
+        self.mic_dropdown_open = false;
+        if cx.try_global::<GlobalConfig>().is_some() {
+            let mut c = cx.global::<GlobalConfig>().0.clone();
+            c.audio.input_device = name;
+            cx.set_global(GlobalConfig(c));
+        }
+        cx.notify();
+    }
+
+    /// 测试当前麦克风可用性：打开探测流，实时显示电平约 1.7s，结束后据峰值给出结论。
+    fn on_test_mic(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_idle() {
+            notify(window, tr("mic.busy"), cx);
+            return;
+        }
+        if self.mic_testing {
+            return;
+        }
+        let device = self.configured_input_device(cx);
+        let level: LevelMeter = Arc::new(AtomicU32::new(0));
+        match MicProbe::start(device, level.clone()) {
+            Ok(probe) => {
+                self.mic_probe = Some(probe);
+                self.mic_testing = true;
+                self.mic_dropdown_open = false;
+                self.level_meter = level;
+                self.levels.clear();
+                cx.notify();
+                self.spawn_mic_test_poll(window, cx);
+            }
+            Err(e) => {
+                tracing::error!("麦克风测试失败: {e}");
+                let msg = match e {
+                    AudioError::NoInputDevice => tr("mic.test_no_device"),
+                    _ => tr("mic.test_failed"),
+                };
+                notify(window, msg, cx);
+            }
+        }
+    }
+
+    /// 测试期间 ~60ms 轮询电平、绘制实时波形；约 1.7s 后收尾评估。
+    fn spawn_mic_test_poll(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let mut ticks = 0u32;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(60))
+                    .await;
+                ticks += 1;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if !this.mic_testing {
+                            return false;
+                        }
+                        this.push_level(load_level(&this.level_meter));
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive || ticks >= 28 {
+                    break;
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| this.finish_mic_test(window, cx));
+        })
+        .detach();
+    }
+
+    /// 收尾麦克风测试：停止探测，据峰值电平给出"正常/无信号"提示。
+    fn finish_mic_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(probe) = self.mic_probe.take() {
+            probe.stop();
+        }
+        if !self.mic_testing {
+            return;
+        }
+        let peak = self.levels.iter().copied().fold(0.0_f32, f32::max);
+        self.mic_testing = false;
+        self.levels.clear();
+        // RMS 阈值：安静环境本底噪声约 0.001~0.002，说话可达 0.02+，0.005 作"有无信号"分界。
+        let msg = if peak < 0.005 {
+            tr("mic.test_no_signal")
+        } else {
+            tr("mic.test_ok")
+        };
+        notify(window, msg, cx);
+        cx.notify();
+    }
+
     // ───────────────────────────── 音频文件管理（2026-06-16）─────────────────────────────
 
     /// 计算本次录音的 WAV 落点：持久化时为 `{音频根}/{record_id}/{时戳}_{短id}.wav` 并建目录；
@@ -612,7 +747,8 @@ impl VoxInk {
     fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (wav_path, persisted) = self.prepare_recording_path(cx);
         let level: LevelMeter = Arc::new(AtomicU32::new(0));
-        match Recorder::start(wav_path.clone(), level.clone()) {
+        let device = self.configured_input_device(cx);
+        match Recorder::start(wav_path.clone(), level.clone(), device) {
             Ok(recorder) => {
                 self.begin_active_recording(wav_path, persisted, "offline");
                 self.recorder = Some(recorder);
@@ -754,7 +890,9 @@ impl VoxInk {
 
         let (wav_path, persisted) = self.prepare_recording_path(cx);
         let level: LevelMeter = Arc::new(AtomicU32::new(0));
-        let capture = match StreamingCapture::start(audio_tx, wav_path.clone(), level.clone()) {
+        let device = self.configured_input_device(cx);
+        let capture =
+            match StreamingCapture::start(audio_tx, wav_path.clone(), level.clone(), device) {
             Ok(capture) => capture,
             Err(e) => {
                 tracing::error!("启动流式采集失败: {e}");
@@ -1555,6 +1693,12 @@ impl VoxInk {
                             .when(recording, |d| d.child(self.render_waveform(cx))),
                     ),
             )
+            // 麦克风栏：当前设备 + 下拉切换 + 测试（频繁操作，常驻主界面）。
+            .child(self.render_mic_bar(cx))
+            // 下拉展开时的设备列表（内联展开，避免浮层依赖）。
+            .when(self.mic_dropdown_open, |this| {
+                this.child(self.render_mic_dropdown(cx))
+            })
             // 实时识别未稳定文本（pending）：浅色显示以区分稳定结果（§4.2.1）。
             .when(!self.state.pending_text.is_empty(), |this| {
                 this.child(
@@ -1599,6 +1743,148 @@ impl VoxInk {
                         this.on_select_mode(TranscriptionMode::Offline, cx)
                     })),
             )
+    }
+
+    /// 麦克风栏：当前设备（可点开下拉切换）+ 测试按钮 + 测试时的实时电平条。
+    fn render_mic_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let idle = self.is_idle();
+        let testing = self.mic_testing;
+        let label = self.current_mic_label(cx);
+
+        let mut trigger = h_flex()
+            .id("mic-trigger")
+            .items_center()
+            .gap_1p5()
+            .h(px(28.))
+            .px_2p5()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(if self.mic_dropdown_open {
+                BRAND
+            } else {
+                cx.theme().border
+            })
+            .bg(cx.theme().background)
+            .text_xs()
+            .child(
+                Icon::empty()
+                    .path("icons/mic.svg")
+                    .size(px(12.))
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(div().max_w(px(180.)).truncate().child(label))
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size(px(12.))
+                    .text_color(cx.theme().muted_foreground),
+            );
+        if idle {
+            trigger = trigger
+                .cursor_pointer()
+                .hover(|s| s.border_color(BRAND))
+                .on_click(cx.listener(Self::on_toggle_mic_dropdown));
+        } else {
+            trigger = trigger.opacity(0.6);
+        }
+
+        // 测试时的实时电平条（与录音波形同风格，置于右侧弹性区）。
+        let mut meter = h_flex().items_center().gap_0p5();
+        if testing {
+            for &l in &self.levels {
+                meter = meter.child(
+                    div()
+                        .w(px(2.))
+                        .h(px(level_bar_height(l)))
+                        .rounded_full()
+                        .bg(STATUS_RECORDING),
+                );
+            }
+        }
+
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .child(trigger)
+            .child(
+                Button::new("mic-test")
+                    .outline()
+                    .small()
+                    .label(if testing {
+                        tr("mic.testing")
+                    } else {
+                        tr("mic.test")
+                    })
+                    .disabled(!idle || testing)
+                    .on_click(cx.listener(Self::on_test_mic)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(meter),
+            )
+    }
+
+    /// 麦克风下拉：「系统默认」+ 各可用设备；当前项高亮。
+    fn render_mic_dropdown(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.configured_input_device(cx).unwrap_or_default();
+        let mut list = v_flex()
+            .id("mic-list")
+            .w_full()
+            .max_h(px(180.))
+            .overflow_y_scroll()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(px(6.))
+            .bg(cx.theme().background)
+            .child(self.mic_option("", tr("mic.default"), current.is_empty(), cx));
+
+        if self.mic_devices.is_empty() {
+            list = list.child(
+                div()
+                    .px_2p5()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr("mic.no_devices")),
+            );
+        } else {
+            for name in &self.mic_devices {
+                let active = *name == current;
+                list = list.child(self.mic_option(name, name.clone(), active, cx));
+            }
+        }
+        list
+    }
+
+    /// 下拉中的单个设备项。
+    fn mic_option(
+        &self,
+        value: &str,
+        label: String,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let value = value.to_string();
+        let id_suffix = if value.is_empty() { "default" } else { &value };
+        let mut item = div()
+            .id(SharedString::from(format!("mic-opt-{id_suffix}")))
+            .w_full()
+            .px_2p5()
+            .py_1()
+            .text_xs()
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().muted))
+            .child(div().truncate().child(label))
+            .on_click(cx.listener(move |this, _, _w, cx| this.select_mic(value.clone(), cx)));
+        if active {
+            item = item.bg(cx.theme().list_active);
+        }
+        item
     }
 
     /// 状态胶囊：● 状态 + MM:SS。

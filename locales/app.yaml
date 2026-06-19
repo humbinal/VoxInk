@@ -141,6 +141,19 @@ settings.streaming_backend:
 settings.offline_backend:
   zh-CN: 离线识别后端
   en: Offline backend
+# ASR 后端显示名（下拉选择；按 backend id 取 backend.{id}）
+backend.aliyun_bailian_streaming:
+  zh-CN: 阿里云百炼（实时）
+  en: Alibaba Bailian (Realtime)
+backend.aliyun_bailian_offline:
+  zh-CN: 阿里云百炼（离线）
+  en: Alibaba Bailian (Offline)
+backend.aliyun_bailian_filetrans:
+  zh-CN: 阿里云百炼（离线大文件）
+  en: Alibaba Bailian (Large file)
+backend.qwen3_asr_selfhosted:
+  zh-CN: Qwen3-ASR 自建服务
+  en: Qwen3-ASR (Self-hosted)
 settings.shared_config_hint:
   zh-CN: 与实时选用同一后端，共用同一份配置（在上方「实时」区填写基址与 Key）
   en: Same backend as realtime; shares one config (set base URL & key in the Realtime section above)

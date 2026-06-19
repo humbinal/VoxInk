@@ -562,8 +562,22 @@ impl SettingsView {
         let l = lang.to_string();
         self.update_config(cx, |c| c.general.language = l.clone());
         crate::i18n::apply_locale(&l);
+        // 占位符在 InputState 构造时已固化，不随 tr() 重渲染更新——切语言后手动重设。
+        self.refresh_placeholders(window, cx);
         window.refresh();
         cx.notify();
+    }
+
+    /// 重设各输入框占位符为当前 locale（切换语言后调用）。
+    fn refresh_placeholders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let api_ph = tr("settings.api_key_ph");
+        let dir_ph = tr("settings.audio_dir_ph");
+        self.stream_api_key
+            .update(cx, |s, cx| s.set_placeholder(api_ph.clone(), window, cx));
+        self.off_api_key
+            .update(cx, |s, cx| s.set_placeholder(api_ph, window, cx));
+        self.audio_dir
+            .update(cx, |s, cx| s.set_placeholder(dir_ph, window, cx));
     }
 
     // ───────────────────────────── 渲染辅助 ─────────────────────────────
@@ -719,7 +733,7 @@ impl SettingsView {
         let current_name = options
             .iter()
             .find(|b| b.id == current_id)
-            .map(|b| b.display_name.clone())
+            .map(|b| backend_label(&b.id, &b.display_name))
             .unwrap_or_else(|| current_id.to_string());
         let id_prefix = match kind {
             Dropdown::Streaming => "dd-stream",
@@ -767,6 +781,7 @@ impl SettingsView {
             for b in options {
                 let id = b.id.clone();
                 let active = b.id == current_id;
+                let name = backend_label(&b.id, &b.display_name);
                 let mut item = div()
                     .id(gpui::SharedString::from(format!("{id_prefix}-{}", b.id)))
                     .w_full()
@@ -774,7 +789,7 @@ impl SettingsView {
                     .py_1()
                     .cursor_pointer()
                     .hover(|s| s.bg(cx.theme().muted))
-                    .child(b.display_name.clone())
+                    .child(name)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_select_backend(kind, id.clone(), window, cx)
                     }));
@@ -1365,6 +1380,14 @@ impl SettingsView {
             )
             .child(div().child(value.to_string()))
     }
+}
+
+/// 后端显示名按当前 locale 本地化：查 `backend.{id}` 翻译键；缺失时回退后端自报名。
+/// （后端 trait 的 `display_name` 是硬编码中文，下拉里改用此函数随语言切换。）
+fn backend_label(id: &str, fallback: &str) -> String {
+    let key = format!("backend.{id}");
+    let s = tr(&key);
+    if s == key { fallback.to_string() } else { s }
 }
 
 /// 递归统计目录内文件总字节数（用于占用显示；忽略错误项）。

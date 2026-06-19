@@ -41,6 +41,8 @@ pub struct GlobalHotkeys {
     manager: GlobalHotKeyManager,
     bindings: HashMap<u32, HotkeyAction>,
     registered: Vec<HotKey>,
+    /// 上次 [`apply_shortcuts`] 注册失败（多为被其它应用占用）的动作集合，供设置面板标记冲突。
+    failed: Vec<HotkeyAction>,
 }
 
 impl gpui::Global for GlobalHotkeys {}
@@ -55,6 +57,12 @@ impl GlobalHotkeys {
     }
 }
 
+/// 某个全局动作在上次注册时是否失败（被占用/解析失败）。供设置面板显示「注册失败」标记。
+pub fn registration_failed(action: HotkeyAction, cx: &App) -> bool {
+    cx.try_global::<GlobalHotkeys>()
+        .is_some_and(|hk| hk.failed.contains(&action))
+}
+
 /// 创建热键管理器、按配置注册并启动事件轮询分发。
 pub fn setup_hotkeys(
     window: WindowHandle<Root>,
@@ -67,6 +75,7 @@ pub fn setup_hotkeys(
         manager,
         bindings: HashMap::new(),
         registered: Vec::new(),
+        failed: Vec::new(),
     });
 
     let conflicts = apply_shortcuts(shortcuts, cx);
@@ -153,6 +162,7 @@ pub fn apply_shortcuts(shortcuts: &ShortcutsConfig, cx: &mut App) -> Vec<String>
     ];
     let hk = cx.global_mut::<GlobalHotkeys>();
     hk.clear();
+    hk.failed.clear();
     let mut conflicts = Vec::new();
     for (spec, action, label) in specs {
         match register_one(&hk.manager, spec.trim()) {
@@ -163,6 +173,7 @@ pub fn apply_shortcuts(shortcuts: &ShortcutsConfig, cx: &mut App) -> Vec<String>
             }
             Err(e) => {
                 tracing::warn!("注册全局快捷键失败 [{label}: {spec}]: {e:#}");
+                hk.failed.push(action);
                 conflicts.push(format!("{label}（{spec}）"));
             }
         }

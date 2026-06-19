@@ -107,9 +107,14 @@ pub struct AudioConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShortcutsConfig {
+    // 全局热键（OS 级注册，应用不在前台也生效）。
     pub toggle_recording: String,
     pub toggle_window: String,
     pub copy_and_paste: String,
+    // 应用内快捷键（仅主窗口聚焦时生效，不做 OS 注册）。
+    pub app_copy_all: String,
+    pub app_new_record: String,
+    pub app_toggle_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +226,10 @@ impl Default for ShortcutsConfig {
             toggle_recording: "Ctrl+Shift+Space".to_string(),
             toggle_window: "Ctrl+Shift+W".to_string(),
             copy_and_paste: "Ctrl+Shift+V".to_string(),
+            // 应用内：C=Copy、N=New、M=Mode（聚焦主窗口时生效）。
+            app_copy_all: "Ctrl+Shift+C".to_string(),
+            app_new_record: "Ctrl+Shift+N".to_string(),
+            app_toggle_mode: "Ctrl+Shift+M".to_string(),
         }
     }
 }

@@ -25,7 +25,7 @@ use crate::asr::{AsrError, BackendRegistry};
 use crate::config::{ShortcutsConfig, VoxInkConfig};
 use crate::i18n::tr;
 use crate::state::TranscriptionMode;
-use crate::theme::BRAND;
+use crate::theme::{BRAND, DANGER};
 
 const FILETRANS_ID: &str = "aliyun_bailian_filetrans";
 /// 设置面板宽度（px）。固定居中覆盖层，与主窗口尺寸无关；上限取主窗口最小宽度（640）以免溢出。
@@ -46,21 +46,54 @@ enum Dropdown {
     Offline,
 }
 
-/// 可改键的快捷键槽位。
+/// 可改键的快捷键槽位（全局 + 应用内）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ShortcutSlot {
+    // 全局热键
     Recording,
     Window,
     Paste,
+    // 应用内快捷键
+    CopyAll,
+    NewRecord,
+    ToggleMode,
 }
 
 impl ShortcutSlot {
+    /// 全局热键槽位（OS 级注册）。
+    const GLOBAL: [ShortcutSlot; 3] = [
+        ShortcutSlot::Recording,
+        ShortcutSlot::Window,
+        ShortcutSlot::Paste,
+    ];
+    /// 应用内快捷键槽位（仅主窗口聚焦时生效）。
+    const IN_APP: [ShortcutSlot; 3] = [
+        ShortcutSlot::CopyAll,
+        ShortcutSlot::NewRecord,
+        ShortcutSlot::ToggleMode,
+    ];
+
     /// 行标题 locale key。
     fn label_key(self) -> &'static str {
         match self {
             ShortcutSlot::Recording => "shortcut.toggle_recording",
             ShortcutSlot::Window => "shortcut.toggle_window",
             ShortcutSlot::Paste => "shortcut.copy_paste",
+            ShortcutSlot::CopyAll => "shortcut.copy_all",
+            ShortcutSlot::NewRecord => "shortcut.new_record",
+            ShortcutSlot::ToggleMode => "shortcut.toggle_mode",
+        }
+    }
+
+    /// 当前绑定字符串。
+    fn get(self, s: &ShortcutsConfig) -> &str {
+        match self {
+            ShortcutSlot::Recording => &s.toggle_recording,
+            ShortcutSlot::Window => &s.toggle_window,
+            ShortcutSlot::Paste => &s.copy_and_paste,
+            ShortcutSlot::CopyAll => &s.app_copy_all,
+            ShortcutSlot::NewRecord => &s.app_new_record,
+            ShortcutSlot::ToggleMode => &s.app_toggle_mode,
         }
     }
 
@@ -69,6 +102,20 @@ impl ShortcutSlot {
             ShortcutSlot::Recording => s.toggle_recording = v,
             ShortcutSlot::Window => s.toggle_window = v,
             ShortcutSlot::Paste => s.copy_and_paste = v,
+            ShortcutSlot::CopyAll => s.app_copy_all = v,
+            ShortcutSlot::NewRecord => s.app_new_record = v,
+            ShortcutSlot::ToggleMode => s.app_toggle_mode = v,
+        }
+    }
+
+    /// 该槽位若为全局热键，返回对应动作（用于查询注册失败状态）。
+    fn global_action(self) -> Option<crate::hotkey::HotkeyAction> {
+        use crate::hotkey::HotkeyAction;
+        match self {
+            ShortcutSlot::Recording => Some(HotkeyAction::ToggleRecording),
+            ShortcutSlot::Window => Some(HotkeyAction::ToggleWindow),
+            ShortcutSlot::Paste => Some(HotkeyAction::CopyAndPaste),
+            _ => None,
         }
     }
 }
@@ -531,7 +578,8 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// 改键后：落盘 + 重注册全部热键，并按结果给出提示。
+    /// 改键后：落盘 + 重注册全部全局热键，并按结果给出提示。
+    /// 优先提示「内部重复」（同一组合绑了多个动作，需用户处理），其次提示全局注册失败（被占用）。
     fn apply_shortcuts_and_report(&self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cfg) = cx.try_global::<GlobalConfig>().map(|g| g.0.clone()) else {
             return;
@@ -539,15 +587,23 @@ impl SettingsView {
         if let Err(e) = cfg.save() {
             tracing::error!("保存快捷键失败: {e:#}");
         }
-        let conflicts = crate::hotkey::apply_shortcuts(&cfg.shortcuts, cx);
-        if conflicts.is_empty() {
-            notify(window, tr("settings.shortcut_updated"), cx);
-        } else {
+        // 应用内快捷键不做 OS 注册；此处仅重注册三个全局热键（幂等，无论改的是哪类槽位）。
+        let reg_conflicts = crate::hotkey::apply_shortcuts(&cfg.shortcuts, cx);
+        let dups = duplicate_specs(&cfg.shortcuts);
+        if !dups.is_empty() {
             notify(
                 window,
-                format!("{}：{}", tr("settings.shortcut_conflict"), conflicts.join("、")),
+                format!("{}：{}", tr("settings.shortcut_dup_warn"), dups.join("、")),
                 cx,
             );
+        } else if !reg_conflicts.is_empty() {
+            notify(
+                window,
+                format!("{}：{}", tr("settings.shortcut_conflict"), reg_conflicts.join("、")),
+                cx,
+            );
+        } else {
+            notify(window, tr("settings.shortcut_updated"), cx);
         }
     }
 
@@ -1303,23 +1359,26 @@ impl SettingsView {
     /// 快捷键改键区：三行可点击改键的「键帽」+ 提示 + 恢复默认。
     /// 容器 track_focus + on_key_down，捕获期间聚焦它以接收按键。
     fn render_shortcuts(&self, cfg: &VoxInkConfig, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = &cfg.shortcuts;
-        v_flex()
+        let mut pane = v_flex()
             .id("shortcuts-pane")
             .track_focus(&self.capture_focus)
             .on_key_down(cx.listener(Self::on_capture_key))
             .w_full()
             .gap_1()
-            .child(self.shortcut_row(ShortcutSlot::Recording, &s.toggle_recording, cx))
-            .child(self.shortcut_row(ShortcutSlot::Window, &s.toggle_window, cx))
-            .child(self.shortcut_row(ShortcutSlot::Paste, &s.copy_and_paste, cx))
-            .child(
-                div()
-                    .pt_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr("settings.shortcuts_hint")),
-            )
+            // ── 全局快捷键 ──
+            .child(self.shortcuts_section_header("settings.shortcuts.global", cx));
+        for slot in ShortcutSlot::GLOBAL {
+            pane = pane.child(self.shortcut_row(slot, cfg, cx));
+        }
+        pane = pane
+            .child(self.shortcuts_hint("settings.shortcuts.global_hint", cx))
+            // ── 应用内快捷键 ──
+            .child(self.shortcuts_section_header("settings.shortcuts.in_app", cx));
+        for slot in ShortcutSlot::IN_APP {
+            pane = pane.child(self.shortcut_row(slot, cfg, cx));
+        }
+        pane.child(self.shortcuts_hint("settings.shortcuts.in_app_hint", cx))
+            .child(self.shortcuts_hint("settings.shortcuts_hint", cx))
             .child(
                 div().pt_2().child(
                     Button::new("shortcut-reset")
@@ -1331,14 +1390,51 @@ impl SettingsView {
             )
     }
 
-    /// 单行：标题 + 可点击的快捷键「键帽」（点击进入捕获，捕获中显示提示，高亮边框）。
+    /// 快捷键分节标题（「全局快捷键」/「应用内快捷键」）。
+    fn shortcuts_section_header(&self, key: &str, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .pt_3()
+            .pb_0p5()
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(cx.theme().foreground)
+            .child(tr(key))
+    }
+
+    /// 快捷键区的浅色说明文字。
+    fn shortcuts_hint(&self, key: &str, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .pt_1()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(tr(key))
+    }
+
+    /// 单行：标题 + 冲突标记 + 可点击的快捷键「键帽」。
+    /// 冲突时键帽边框转危险色；标记区分「内部重复」与「全局注册失败」。
     fn shortcut_row(
         &self,
         slot: ShortcutSlot,
-        binding: &str,
+        cfg: &VoxInkConfig,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let s = &cfg.shortcuts;
+        let binding = slot.get(s);
         let capturing = self.capturing == Some(slot);
+        let duplicated = slot_duplicated(slot, s);
+        // 注册失败仅对全局槽位有意义，且重复时优先报「冲突」不再叠加「注册失败」。
+        let reg_failed = !duplicated
+            && slot
+                .global_action()
+                .is_some_and(|a| crate::hotkey::registration_failed(a, cx));
+        let conflict_key = if duplicated {
+            Some("settings.shortcut_duplicate")
+        } else if reg_failed {
+            Some("settings.shortcut_failed")
+        } else {
+            None
+        };
+
         let display = if capturing {
             tr("settings.shortcut_capturing")
         } else if binding.trim().is_empty() {
@@ -1346,6 +1442,14 @@ impl SettingsView {
         } else {
             binding.to_string()
         };
+        let border = if capturing {
+            BRAND
+        } else if conflict_key.is_some() {
+            DANGER
+        } else {
+            cx.theme().border
+        };
+
         h_flex()
             .w_full()
             .justify_between()
@@ -1353,24 +1457,40 @@ impl SettingsView {
             .py_1()
             .child(div().child(tr(slot.label_key())))
             .child(
-                div()
-                    .id(gpui::SharedString::from(format!("sc-cap-{}", slot.label_key())))
-                    .flex()
-                    .justify_center()
-                    .min_w(px(150.))
-                    .px_3()
-                    .py_1()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(if capturing { BRAND } else { cx.theme().border })
-                    .bg(cx.theme().muted)
-                    .text_xs()
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(BRAND))
-                    .child(display)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.begin_capture(slot, window, cx)
-                    })),
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(conflict_key, |this, k| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(DANGER)
+                                .child(format!("⚠ {}", tr(k))),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(gpui::SharedString::from(format!(
+                                "sc-cap-{}",
+                                slot.label_key()
+                            )))
+                            .flex()
+                            .justify_center()
+                            .min_w(px(150.))
+                            .px_3()
+                            .py_1()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(border)
+                            .bg(cx.theme().muted)
+                            .text_xs()
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(BRAND))
+                            .child(display)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_capture(slot, window, cx)
+                            })),
+                    ),
             )
     }
 
@@ -1395,6 +1515,41 @@ fn backend_label(id: &str, fallback: &str) -> String {
     let key = format!("backend.{id}");
     let s = tr(&key);
     if s == key { fallback.to_string() } else { s }
+}
+
+/// 规范化快捷键字符串用于比较：去空白 + 小写（捕获产出的形如 "Ctrl+Shift+C" 大小写一致，
+/// 此处仅作稳健兜底）。
+fn norm_spec(spec: &str) -> String {
+    spec.trim().to_ascii_lowercase()
+}
+
+/// 全部快捷键槽位（全局 + 应用内），用于跨节冲突检测。
+fn all_slots() -> impl Iterator<Item = ShortcutSlot> {
+    ShortcutSlot::GLOBAL.into_iter().chain(ShortcutSlot::IN_APP)
+}
+
+/// 某槽位的绑定是否与其它槽位重复（非空且规范化后相等）。
+fn slot_duplicated(slot: ShortcutSlot, s: &ShortcutsConfig) -> bool {
+    let v = norm_spec(slot.get(s));
+    if v.is_empty() {
+        return false;
+    }
+    all_slots().any(|o| o != slot && norm_spec(o.get(s)) == v)
+}
+
+/// 返回被多个动作共用（重复）的快捷键原始字符串列表（去重，用于提示）。
+fn duplicate_specs(s: &ShortcutsConfig) -> Vec<String> {
+    let mut dups: Vec<String> = Vec::new();
+    for slot in all_slots() {
+        let raw = slot.get(s).trim();
+        if raw.is_empty() || !slot_duplicated(slot, s) {
+            continue;
+        }
+        if !dups.iter().any(|d| norm_spec(d) == norm_spec(raw)) {
+            dups.push(raw.to_string());
+        }
+    }
+    dups
 }
 
 /// 递归统计目录内文件总字节数（用于占用显示；忽略错误项）。
@@ -1425,5 +1580,41 @@ fn human_size(bytes: u64) -> String {
         format!("{:.1} MB", b / (KB * KB))
     } else {
         format!("{:.2} GB", b / (KB * KB * KB))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_shortcuts_have_no_duplicates() {
+        let s = ShortcutsConfig::default();
+        assert!(duplicate_specs(&s).is_empty());
+        assert!(ShortcutSlot::GLOBAL
+            .into_iter()
+            .chain(ShortcutSlot::IN_APP)
+            .all(|slot| !slot_duplicated(slot, &s)));
+    }
+
+    #[test]
+    fn detects_duplicate_across_sections() {
+        let mut s = ShortcutsConfig::default();
+        // 让应用内「复制全部」与全局「复制并粘贴」撞成同一组合（忽略大小写）。
+        s.app_copy_all = s.copy_and_paste.to_ascii_lowercase();
+        assert!(slot_duplicated(ShortcutSlot::CopyAll, &s));
+        assert!(slot_duplicated(ShortcutSlot::Paste, &s));
+        assert!(!slot_duplicated(ShortcutSlot::NewRecord, &s));
+        // 仅报告一次该重复组合。
+        assert_eq!(duplicate_specs(&s).len(), 1);
+    }
+
+    #[test]
+    fn empty_binding_is_not_a_duplicate() {
+        let mut s = ShortcutsConfig::default();
+        s.app_copy_all = String::new();
+        s.app_new_record = String::new();
+        assert!(!slot_duplicated(ShortcutSlot::CopyAll, &s));
+        assert!(duplicate_specs(&s).is_empty());
     }
 }

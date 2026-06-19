@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Entity, Focusable, Hsla,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled, Subscription, Window,
     WindowControlArea, div, ease_in_out, prelude::*, px, white,
 };
 use gpui_component::{
@@ -347,6 +347,11 @@ impl VoxInk {
 
     /// 新建一条空记录并切为当前（录制中禁用）。
     fn on_new_record(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_record(window, cx);
+    }
+
+    /// 新建一条空记录并切到它（点击「新建记录」或应用内快捷键触发）。
+    pub fn new_record(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_idle() {
             notify(window, "录制中，暂不能新建记录", cx);
             return;
@@ -1215,9 +1220,46 @@ impl VoxInk {
         cx.notify();
     }
 
+    /// 在实时/离线之间切换转录模式（应用内快捷键触发）。
+    fn toggle_mode(&mut self, cx: &mut Context<Self>) {
+        let next = match self.state.transcription_mode {
+            TranscriptionMode::Streaming => TranscriptionMode::Offline,
+            TranscriptionMode::Offline => TranscriptionMode::Streaming,
+        };
+        self.on_select_mode(next, cx);
+    }
+
+    /// 主窗口聚焦时的按键分发：匹配「应用内快捷键」并执行对应动作。
+    ///
+    /// 设置面板打开时不处理（其有自己的改键捕获）；非「修饰键+主键」的普通输入直接放行
+    /// （[`accelerator_from_keystroke`] 返回 None），故不影响编辑区正常打字。
+    fn on_app_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_settings {
+            return;
+        }
+        let Some(spec) = crate::hotkey::accelerator_from_keystroke(&ev.keystroke) else {
+            return;
+        };
+        let Some(s) = cx.try_global::<GlobalConfig>().map(|g| g.0.shortcuts.clone()) else {
+            return;
+        };
+        if spec == s.app_copy_all.trim() {
+            self.copy_all(window, cx);
+        } else if spec == s.app_new_record.trim() {
+            self.new_record(window, cx);
+        } else if spec == s.app_toggle_mode.trim() {
+            self.toggle_mode(cx);
+        }
+    }
+
     fn on_copy(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_all(window, cx);
+    }
+
+    /// 复制编辑区全部文本到剪贴板（点击「一键复制」或应用内快捷键触发）。
+    pub fn copy_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value().to_string();
-        tracing::info!(chars = text.chars().count(), "复制按钮被点击");
+        tracing::info!(chars = text.chars().count(), "复制全部文本");
 
         if text.is_empty() {
             notify(window, "没有可复制的内容", cx);
@@ -2131,6 +2173,8 @@ impl Render for VoxInk {
             .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // 应用内快捷键：聚焦的编辑/搜索框按键会冒泡到此处分发（见 on_app_key）。
+            .on_key_down(cx.listener(Self::on_app_key))
             .child(
                 v_flex()
                     .size_full()

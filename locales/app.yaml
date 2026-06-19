@@ -233,8 +233,20 @@ theme.system:
   zh-CN: 跟随系统
   en: System
 settings.section.shortcuts:
+  zh-CN: 快捷键
+  en: Shortcuts
+settings.shortcuts.global:
   zh-CN: 全局快捷键
   en: Global shortcuts
+settings.shortcuts.global_hint:
+  zh-CN: 系统级热键，应用不在前台也生效
+  en: System-wide hotkeys; work even when the app is in the background
+settings.shortcuts.in_app:
+  zh-CN: 应用内快捷键
+  en: In-app shortcuts
+settings.shortcuts.in_app_hint:
+  zh-CN: 仅当 VoxInk 窗口在前台时生效
+  en: Only active when the VoxInk window is focused
 shortcut.toggle_recording:
   zh-CN: 开始/停止录音
   en: Start/stop recording
@@ -244,6 +256,24 @@ shortcut.toggle_window:
 shortcut.copy_paste:
   zh-CN: 复制并粘贴到前台
   en: Copy & paste to foreground
+shortcut.copy_all:
+  zh-CN: 复制全部文本
+  en: Copy all text
+shortcut.new_record:
+  zh-CN: 新建记录
+  en: New record
+shortcut.toggle_mode:
+  zh-CN: 切换实时/离线模式
+  en: Toggle realtime/offline mode
+settings.shortcut_duplicate:
+  zh-CN: 冲突
+  en: Conflict
+settings.shortcut_failed:
+  zh-CN: 注册失败
+  en: Registration failed
+settings.shortcut_dup_warn:
+  zh-CN: 快捷键重复，请改用其它组合
+  en: Duplicate shortcut — please pick another combo
 settings.shortcuts_hint:
   zh-CN: 点击快捷键后按下新组合即可修改（需含 Ctrl/Alt/Shift 等修饰键；Esc 取消）
   en: Click a shortcut then press a new combo (must include Ctrl/Alt/Shift; Esc to cancel)

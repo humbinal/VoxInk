@@ -40,6 +40,9 @@ mic.no_devices:
 mic.busy:
   zh-CN: 录制中，暂不能测试麦克风
   en: Recording — cannot test the mic now
+mode.title:
+  zh-CN: 转录模式
+  en: Mode
 mode.streaming:
   zh-CN: 实时
   en: Realtime

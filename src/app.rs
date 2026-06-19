@@ -23,6 +23,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     notification::Notification,
+    switch::Switch,
     v_flex,
 };
 
@@ -1758,33 +1759,43 @@ impl VoxInk {
             })
     }
 
-    /// 转录模式切换（实时 / 离线）。录音中禁用但仍显示当前模式。
+    /// 转录模式切换（离线 ⟷ 实时）。用 Switch 表达"二选一"，两侧标注模式名（当前项高亮），
+    /// 前缀「转录模式」文案点明用途。录音中禁用但仍显示当前模式。
     fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
         let disabled = self.state.recording_state != RecordingState::Idle;
+        let active = cx.theme().foreground;
+        let muted = cx.theme().muted_foreground;
+        // 侧标签：当前模式用前景色 + 中等字重，非当前用浅色。
+        let side_label = |text: String, on: bool| {
+            div()
+                .text_sm()
+                .text_color(if on { active } else { muted })
+                .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                .child(text)
+        };
         h_flex()
             .flex_shrink_0()
+            .items_center()
             .gap_2()
+            .child(div().text_sm().text_color(muted).child(tr("mode.title")))
+            .child(side_label(tr("mode.offline"), !is_streaming))
             .child(
-                Button::new("mode-streaming")
-                    .when(is_streaming, |b| b.primary())
-                    .when(!is_streaming, |b| b.outline())
+                // checked = 实时（拨到右侧）；unchecked = 离线。
+                Switch::new("mode-switch")
+                    .checked(is_streaming)
+                    .color(BRAND)
                     .disabled(disabled)
-                    .label(tr("mode.streaming"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.on_select_mode(TranscriptionMode::Streaming, cx)
+                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                        let mode = if *checked {
+                            TranscriptionMode::Streaming
+                        } else {
+                            TranscriptionMode::Offline
+                        };
+                        this.on_select_mode(mode, cx);
                     })),
             )
-            .child(
-                Button::new("mode-offline")
-                    .when(!is_streaming, |b| b.primary())
-                    .when(is_streaming, |b| b.outline())
-                    .disabled(disabled)
-                    .label(tr("mode.offline"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.on_select_mode(TranscriptionMode::Offline, cx)
-                    })),
-            )
+            .child(side_label(tr("mode.streaming"), is_streaming))
     }
 
     /// 麦克风栏：当前设备（可点开下拉切换）+ 测试按钮 + 测试时的实时电平条。

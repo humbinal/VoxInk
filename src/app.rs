@@ -6,39 +6,39 @@
 //! - 录制中禁用「新建」与切换记录；正文手动编辑防抖自动保存。
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Entity, Focusable, Hsla,
-    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled, Subscription, Window,
-    WindowControlArea, div, ease_in_out, prelude::*, px, white,
+    div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement, App,
+    ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent, ParentElement,
+    Render, SharedString, Styled, Subscription, Window, WindowControlArea,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt,
-    button::{Button, ButtonVariants},
-    h_flex,
-    input::{Input, InputEvent, InputState},
-    notification::Notification,
-    v_flex,
+    button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, v_flex, ActiveTheme, Disableable,
+    Icon,
+    IconName,
+    Root,
+    Sizable,
+    WindowExt,
 };
 
 use crate::theme::{
-    BRAND, DANGER, MODE_OFFLINE, MODE_STREAMING, STATUS_IDLE, STATUS_PROCESSING, STATUS_RECORDING,
-    brand_tint,
+    brand_tint, BRAND, DANGER, MODE_OFFLINE, MODE_STREAMING, STATUS_IDLE, STATUS_PROCESSING,
+    STATUS_RECORDING,
 };
 
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{
-    AudioError, LevelMeter, MicProbe, Recorder, StreamingCapture, list_input_devices, load_level,
+    list_input_devices, load_level, AudioError, LevelMeter, MicProbe, Recorder, StreamingCapture,
 };
 use crate::config::VoxInkConfig;
-use crate::history::GlobalHistory;
 use crate::history::db::{Record, Segment};
+use crate::history::GlobalHistory;
 use crate::i18n::tr;
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::state::{AppState, RecordingState, TranscriptionMode};
@@ -901,17 +901,17 @@ impl VoxInk {
         let device = self.configured_input_device(cx);
         let capture =
             match StreamingCapture::start(audio_tx, wav_path.clone(), level.clone(), device) {
-            Ok(capture) => capture,
-            Err(e) => {
-                tracing::error!("启动流式采集失败: {e}");
-                let msg = match e {
-                    AudioError::NoInputDevice => "未检测到麦克风，请检查录音设备",
-                    _ => "无法开始录音，请重试",
-                };
-                notify(window, msg, cx);
-                return;
-            }
-        };
+                Ok(capture) => capture,
+                Err(e) => {
+                    tracing::error!("启动流式采集失败: {e}");
+                    let msg = match e {
+                        AudioError::NoInputDevice => "未检测到麦克风，请检查录音设备",
+                        _ => "无法开始录音，请重试",
+                    };
+                    notify(window, msg, cx);
+                    return;
+                }
+            };
         self.begin_active_recording(wav_path, persisted, "streaming");
         self.streaming = Some(StreamingSession { capture });
         self.level_meter = level;
@@ -1243,7 +1243,10 @@ impl VoxInk {
         let Some(spec) = crate::hotkey::accelerator_from_keystroke(&ev.keystroke) else {
             return;
         };
-        let Some(s) = cx.try_global::<GlobalConfig>().map(|g| g.0.shortcuts.clone()) else {
+        let Some(s) = cx
+            .try_global::<GlobalConfig>()
+            .map(|g| g.0.shortcuts.clone())
+        else {
             return;
         };
         if spec == s.app_copy_all.trim() {
@@ -1778,11 +1781,15 @@ impl VoxInk {
         };
 
         // 轨道 40×22，滑块 16，内边距 3 → 左/右端位置。
-        let track_color = if is_streaming { MODE_STREAMING } else { MODE_OFFLINE };
+        let track_color = if is_streaming {
+            MODE_STREAMING
+        } else {
+            MODE_OFFLINE
+        };
         let mut sw = div()
             .id("mode-switch")
             .w(px(40.))
-            .h(px(22.))
+            .h(px(20.))
             .flex_shrink_0()
             .rounded_full()
             .bg(track_color)
@@ -1791,8 +1798,8 @@ impl VoxInk {
                 div()
                     .absolute()
                     .top(px(3.))
-                    .left(px(if is_streaming { 21. } else { 3. }))
-                    .size(px(16.))
+                    .left(px(if is_streaming { 22. } else { 4. }))
+                    .size(px(14.))
                     .rounded_full()
                     .bg(white())
                     .shadow_sm(),
@@ -2140,7 +2147,14 @@ impl VoxInk {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(div().w_full().text_sm().truncate().mb(px(2.)).child(snippet))
+                    .child(
+                        div()
+                            .w_full()
+                            .text_sm()
+                            .truncate()
+                            .mb(px(2.))
+                            .child(snippet),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -2172,7 +2186,12 @@ impl VoxInk {
                             .icon(IconName::Redo)
                             .tooltip(tr("segments.retranscribe"))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.retranscribe_segment(id_re.clone(), path_re.clone(), window, cx)
+                                this.retranscribe_segment(
+                                    id_re.clone(),
+                                    path_re.clone(),
+                                    window,
+                                    cx,
+                                )
                             })),
                     )
                     .child(

@@ -41,8 +41,8 @@ pub const DANGER: Hsla = hsl(5.0, 74.0, 60.0);
 
 /// 转录模式开关轨道色——两种明亮且对比的颜色区分模式（无启用/禁用语义）。
 /// 离线：清爽蓝；实时：暖琥珀。两色在明暗主题下均清晰。
-pub const MODE_OFFLINE: Hsla = hsl(208.0, 72.0, 55.0);
-pub const MODE_STREAMING: Hsla = hsl(33.0, 90.0, 57.0);
+pub const MODE_OFFLINE: Hsla = hsl(194.0, 28.0, 62.0);
+pub const MODE_STREAMING: Hsla = hsl(340.0, 23.0, 62.0);
 
 /// 主色的浅色填充（用于「新建」按钮底、当前记录项高亮）——浅色主题。
 pub const BRAND_TINT_LIGHT: Hsla = hsl(172.0, 46.0, 93.0);

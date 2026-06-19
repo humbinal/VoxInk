@@ -1759,18 +1759,20 @@ impl VoxInk {
             })
     }
 
-    /// 转录模式切换（离线 ⟷ 实时）。用 Switch 表达"二选一"，两侧标注模式名（当前项高亮），
-    /// 前缀「转录模式」文案点明用途。录音中禁用但仍显示当前模式。
+    /// 转录模式切换（离线 ⟷ 实时）。离线/实时是对等的二选一，无"启用/禁用"语义，
+    /// 故 Switch 不用品牌高亮色——两态统一用系统中性轨道色（`theme.switch`），仅靠**滑块位置**
+    /// 表示当前选择；两侧模式名同色，当前项仅以字重略作区分。前缀「转录模式」点明用途。
+    /// 录音中禁用但仍显示当前模式。
     fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
         let disabled = self.state.recording_state != RecordingState::Idle;
-        let active = cx.theme().foreground;
+        let fg = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
-        // 侧标签：当前模式用前景色 + 中等字重，非当前用浅色。
+        // 侧标签：两态同色（前景色），当前项仅以中等字重区分，不做颜色高亮。
         let side_label = |text: String, on: bool| {
             div()
                 .text_sm()
-                .text_color(if on { active } else { muted })
+                .text_color(fg)
                 .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                 .child(text)
         };
@@ -1781,10 +1783,10 @@ impl VoxInk {
             .child(div().text_sm().text_color(muted).child(tr("mode.title")))
             .child(side_label(tr("mode.offline"), !is_streaming))
             .child(
-                // checked = 实时（拨到右侧）；unchecked = 离线。
+                // checked = 实时（滑块在右）；unchecked = 离线。color = 中性轨道色，使两态无色差。
                 Switch::new("mode-switch")
                     .checked(is_streaming)
-                    .color(BRAND)
+                    .color(cx.theme().switch)
                     .disabled(disabled)
                     .on_click(cx.listener(|this, checked: &bool, _w, cx| {
                         let mode = if *checked {

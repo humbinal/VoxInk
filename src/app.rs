@@ -1415,7 +1415,8 @@ impl VoxInk {
 
         self.polish_loading = true;
         self.polish_error = None;
-        self.polish_result = None;
+        // 置空串：流式增量将追加到此，结果区显示打字机效果。
+        self.polish_result = Some(String::new());
         cx.notify();
 
         let req = PolishRequest {
@@ -1428,21 +1429,41 @@ impl VoxInk {
         };
 
         cx.spawn_in(window, async move |this, cx| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<polish::PolishEvent>(64);
             handle.spawn(async move {
                 let client = polish::build_client();
-                let _ = tx.send(polish::polish(&client, req).await);
+                polish::polish_stream(&client, req, tx).await;
             });
-            let outcome = rx.await;
-            let _ = this.update_in(cx, |this, _window, cx| {
-                this.polish_loading = false;
-                match outcome {
-                    Ok(Ok(text)) => this.polish_result = Some(text),
-                    Ok(Err(e)) => this.polish_error = Some(e.to_string()),
-                    Err(_) => this.polish_error = Some("润色已取消".to_string()),
+            while let Some(event) = rx.recv().await {
+                let stop = this
+                    .update_in(cx, |this, _window, cx| {
+                        match event {
+                            polish::PolishEvent::Delta(d) => {
+                                if let Some(buf) = this.polish_result.as_mut() {
+                                    buf.push_str(&d);
+                                }
+                                cx.notify();
+                                false
+                            }
+                            polish::PolishEvent::Done => {
+                                this.polish_loading = false;
+                                cx.notify();
+                                true
+                            }
+                            polish::PolishEvent::Error(e) => {
+                                this.polish_loading = false;
+                                this.polish_error = Some(e.to_string());
+                                this.polish_result = None;
+                                cx.notify();
+                                true
+                            }
+                        }
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
                 }
-                cx.notify();
-            });
+            }
         })
         .detach();
     }
@@ -2433,7 +2454,12 @@ impl VoxInk {
             .try_global::<GlobalConfig>()
             .map(|g| g.0.polish.templates.clone())
             .unwrap_or_default();
-        let has_result = self.polish_result.is_some();
+        // 结果可操作（应用/复制/另存）：仅在流式完成且有非空结果时。
+        let has_result = !self.polish_loading
+            && self
+                .polish_result
+                .as_ref()
+                .is_some_and(|r| !r.trim().is_empty());
 
         // 模板选择 chips。
         let mut chips = h_flex().flex_wrap().gap_1p5();
@@ -2453,21 +2479,26 @@ impl VoxInk {
             );
         }
 
-        // 右栏结果区内容：加载中 / 错误 / 结果 / 占位。
-        let result_body: AnyElement = if self.polish_loading {
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(tr("polish.running"))
-                .into_any_element()
-        } else if let Some(err) = &self.polish_error {
+        // 右栏结果区内容：错误优先 → 流式累积文本（打字机）→ 加载中 → 占位。
+        let streaming_text = self
+            .polish_result
+            .as_ref()
+            .filter(|r| !r.is_empty())
+            .cloned();
+        let result_body: AnyElement = if let Some(err) = &self.polish_error {
             div()
                 .text_sm()
                 .text_color(DANGER)
                 .child(err.clone())
                 .into_any_element()
-        } else if let Some(result) = &self.polish_result {
-            div().text_sm().child(result.clone()).into_any_element()
+        } else if let Some(text) = streaming_text {
+            div().text_sm().child(text).into_any_element()
+        } else if self.polish_loading {
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr("polish.running"))
+                .into_any_element()
         } else {
             div()
                 .text_sm()

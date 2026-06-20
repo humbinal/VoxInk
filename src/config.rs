@@ -208,6 +208,11 @@ impl PolishConfig {
     }
 }
 
+/// 是否为内置模板（按固定 id 判定）。内置模板可改提示词但不可改名/删除。
+pub fn is_builtin_template(id: &str) -> bool {
+    matches!(id, "general" | "written" | "meeting" | "todo" | "email")
+}
+
 /// 内置默认润色模板（首次运行写入；用户可在设置内改写其提示词）。
 pub fn default_polish_templates() -> Vec<PolishTemplate> {
     let t = |id: &str, name: &str, prompt: &str| PolishTemplate {

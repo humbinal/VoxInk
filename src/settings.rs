@@ -177,6 +177,8 @@ pub struct SettingsView {
     polish_api_key: Entity<InputState>,
     /// 当前编辑/选用的润色模板提示词（多行）。
     polish_prompt: Entity<InputState>,
+    /// 当前编辑模板的名称（仅自定义模板可改）。
+    polish_name: Entity<InputState>,
     /// 当前编辑/选用的润色模板 id。
     polish_edit_template: String,
     /// 当前选中的分类标签。
@@ -224,6 +226,8 @@ impl SettingsView {
             polish_api_key: cx
                 .new(|cx| InputState::new(window, cx).placeholder(tr("settings.api_key_ph"))),
             polish_prompt: cx.new(|cx| InputState::new(window, cx).multi_line(true).auto_grow(3, 8)),
+            polish_name: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr("polish.name_ph"))),
             polish_edit_template: String::new(),
             active_tab: SettingsTab::Asr,
             scroll: ScrollHandle::new(),
@@ -280,6 +284,8 @@ impl SettingsView {
         self.polish_edit_template = tpl.id.clone();
         self.polish_prompt
             .update(cx, |s, cx| s.set_value(tpl.prompt.clone(), window, cx));
+        self.polish_name
+            .update(cx, |s, cx| s.set_value(tpl.name.clone(), window, cx));
     }
 
     fn load_stream_inputs(
@@ -345,6 +351,7 @@ impl SettingsView {
         let p_model = self.polish_model.read(cx).value().to_string();
         let p_key = self.polish_api_key.read(cx).value().to_string();
         let p_prompt = self.polish_prompt.read(cx).value().to_string();
+        let p_name = self.polish_name.read(cx).value().to_string();
         let p_tpl = self.polish_edit_template.clone();
 
         self.update_config(cx, |c| {
@@ -355,6 +362,10 @@ impl SettingsView {
                 c.polish.active_template = p_tpl.clone();
                 if let Some(t) = c.polish.templates.iter_mut().find(|t| t.id == p_tpl) {
                     t.prompt = p_prompt.clone();
+                    // 仅自定义模板允许改名。
+                    if !crate::config::is_builtin_template(&p_tpl) && !p_name.trim().is_empty() {
+                        t.name = p_name.trim().to_string();
+                    }
                 }
             }
         });
@@ -834,6 +845,96 @@ impl SettingsView {
             )
     }
 
+    /// 把当前编辑模板的名称/提示词存回配置（切换/增删前调用，避免丢失编辑）。
+    fn flush_current_polish_template(&self, cx: &mut Context<Self>) {
+        let id = self.polish_edit_template.clone();
+        if id.is_empty() {
+            return;
+        }
+        let name = self.polish_name.read(cx).value().to_string();
+        let prompt = self.polish_prompt.read(cx).value().to_string();
+        self.update_config(cx, move |c| {
+            if let Some(t) = c.polish.templates.iter_mut().find(|t| t.id == id) {
+                t.prompt = prompt;
+                if !crate::config::is_builtin_template(&id) && !name.trim().is_empty() {
+                    t.name = name.trim().to_string();
+                }
+            }
+        });
+    }
+
+    /// 载入某模板到名称/提示词输入框，并设为当前编辑项。
+    fn load_polish_template(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, prompt) = cx
+            .try_global::<GlobalConfig>()
+            .and_then(|g| {
+                g.0.polish
+                    .templates
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| (t.name.clone(), t.prompt.clone()))
+            })
+            .unwrap_or_default();
+        self.polish_edit_template = id;
+        self.polish_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+        self.polish_prompt
+            .update(cx, |s, cx| s.set_value(prompt, window, cx));
+    }
+
+    /// 切换选用/编辑的模板（兼作"当前润色模板"）。
+    fn switch_polish_template(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_current_polish_template(cx);
+        let active = id.clone();
+        self.load_polish_template(id, window, cx);
+        self.update_config(cx, move |c| c.polish.active_template = active.clone());
+        cx.notify();
+    }
+
+    /// 新增一个自定义模板并选中编辑。
+    fn add_polish_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_current_polish_template(cx);
+        let id = format!("custom-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let name = tr("polish.new_template_name");
+        let tpl = crate::config::PolishTemplate {
+            id: id.clone(),
+            name: name.clone(),
+            prompt: String::new(),
+        };
+        let active = id.clone();
+        self.update_config(cx, move |c| {
+            c.polish.templates.push(tpl);
+            c.polish.active_template = active.clone();
+        });
+        self.polish_edit_template = id;
+        self.polish_name
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+        self.polish_prompt
+            .update(cx, |s, cx| s.set_value(String::new(), window, cx));
+        cx.notify();
+    }
+
+    /// 删除当前自定义模板（内置模板不可删）。
+    fn delete_polish_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.polish_edit_template.clone();
+        if id.is_empty() || crate::config::is_builtin_template(&id) {
+            return;
+        }
+        self.update_config(cx, move |c| {
+            c.polish.templates.retain(|t| t.id != id);
+            if !c.polish.templates.iter().any(|t| t.id == c.polish.active_template) {
+                c.polish.active_template =
+                    c.polish.templates.first().map(|t| t.id.clone()).unwrap_or_default();
+            }
+        });
+        let new_id = cx
+            .try_global::<GlobalConfig>()
+            .map(|g| g.0.polish.active_template.clone())
+            .unwrap_or_default();
+        self.load_polish_template(new_id, window, cx);
+        cx.notify();
+    }
+
     /// AI 润色设置区：厂商预设 + base_url/model/key + 模板选择与提示词编辑。
     fn render_polish_settings(
         &self,
@@ -869,30 +970,23 @@ impl SettingsView {
                     .when(!selected, |b| b.outline())
                     .label(t.name.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let cur = this.polish_edit_template.clone();
-                        let cur_prompt = this.polish_prompt.read(cx).value().to_string();
-                        this.update_config(cx, |c| {
-                            if let Some(t) = c.polish.templates.iter_mut().find(|t| t.id == cur) {
-                                t.prompt = cur_prompt;
-                            }
-                        });
-                        let new_prompt = cx
-                            .try_global::<GlobalConfig>()
-                            .and_then(|g| {
-                                g.0.polish
-                                    .templates
-                                    .iter()
-                                    .find(|t| t.id == id)
-                                    .map(|t| t.prompt.clone())
-                            })
-                            .unwrap_or_default();
-                        this.polish_edit_template = id.clone();
-                        this.polish_prompt
-                            .update(cx, |s, cx| s.set_value(new_prompt, window, cx));
-                        cx.notify();
+                        this.switch_polish_template(id.clone(), window, cx)
                     })),
             );
         }
+        // 「+ 新增」自定义模板。
+        tpls = tpls.child(
+            Button::new("polish-tpl-add")
+                .ghost()
+                .small()
+                .icon(IconName::Plus)
+                .label(tr("polish.add_template"))
+                .on_click(cx.listener(|this, _, window, cx| this.add_polish_template(window, cx))),
+        );
+
+        // 当前编辑的是自定义模板：可改名 + 可删除。
+        let editing_custom = !self.polish_edit_template.is_empty()
+            && !crate::config::is_builtin_template(&self.polish_edit_template);
 
         // 全部用整行输入（标签在上、输入框占满宽度），避免固定窄宽把长 URL 截断。
         v_flex()
@@ -919,6 +1013,26 @@ impl SettingsView {
             )
             .child(self.field_label("polish.template", cx))
             .child(tpls)
+            // 自定义模板：名称输入 + 删除按钮（内置模板不显示此行）。
+            .when(editing_custom, |this| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .child(div().flex_1().child(Input::new(&self.polish_name).small()))
+                        .child(
+                            Button::new("polish-tpl-del")
+                                .outline()
+                                .small()
+                                .icon(IconName::Delete)
+                                .label(tr("polish.delete_template"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.delete_polish_template(window, cx)
+                                })),
+                        ),
+                )
+            })
             .child(self.field_label("polish.prompt", cx))
             .child(Input::new(&self.polish_prompt))
             .child(

@@ -12,8 +12,6 @@ use serde::Deserialize;
 /// 润色错误（映射 HTTP 状态与传输错误，供 UI 友好提示）。
 #[derive(Debug)]
 pub enum PolishError {
-    /// 未完成配置（base_url/model/key 缺失）。
-    NotConfigured,
     /// 401：API Key 无效。
     Auth,
     /// 403：模型无权限/未开通。
@@ -31,9 +29,6 @@ pub enum PolishError {
 impl std::fmt::Display for PolishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PolishError::NotConfigured => {
-                write!(f, "请先在「设置 → AI 润色」配置接口地址、模型与 API Key")
-            }
             PolishError::Auth => write!(f, "API Key 无效，请检查后重试"),
             PolishError::AccessDenied(d) => write!(f, "模型无权限或未开通：{d}"),
             PolishError::Quota(d) => write!(f, "请求过于频繁或额度不足：{d}"),
@@ -54,18 +49,26 @@ pub struct PolishRequest {
     pub text: String,
 }
 
+/// 流式润色事件：增量文本 / 完成 / 出错。
+pub enum PolishEvent {
+    Delta(String),
+    Done,
+    Error(PolishError),
+}
+
+/// OpenAI 兼容流式分片：`choices[0].delta.content`。
 #[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
 }
 
 #[derive(Deserialize)]
-struct Choice {
-    message: ChoiceMessage,
+struct StreamChoice {
+    delta: StreamDelta,
 }
 
 #[derive(Deserialize)]
-struct ChoiceMessage {
+struct StreamDelta {
     content: Option<String>,
 }
 
@@ -87,70 +90,92 @@ fn chat_endpoint(base_url: &str) -> String {
     }
 }
 
-/// 执行一次润色，返回润色后的正文。
-pub async fn polish(client: &reqwest::Client, req: PolishRequest) -> Result<String, PolishError> {
-    if req.base_url.trim().is_empty()
-        || req.model.trim().is_empty()
-        || req.api_key.trim().is_empty()
-        || req.text.trim().is_empty()
-    {
-        return Err(PolishError::NotConfigured);
-    }
-
+/// 流式润色：增量把 `delta.content` 通过 `tx` 送出（打字机效果），结束发 `Done`，
+/// 出错发 `Error`。调用方（已校验过配置非空）只需消费事件并更新 UI。
+pub async fn polish_stream(
+    client: &reqwest::Client,
+    req: PolishRequest,
+    tx: tokio::sync::mpsc::Sender<PolishEvent>,
+) {
     let body = serde_json::json!({
         "model": req.model,
         "temperature": req.temperature,
-        "stream": false,
+        "stream": true,
         "messages": [
             { "role": "system", "content": req.system_prompt },
             { "role": "user", "content": req.text },
         ],
     });
 
-    let response = client
+    let response = match client
         .post(chat_endpoint(&req.base_url))
         .bearer_auth(req.api_key.trim())
         .json(&body)
         .send()
         .await
-        .map_err(map_reqwest_error)?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(PolishEvent::Error(map_reqwest_error(e))).await;
+            return;
+        }
+    };
 
     let status = response.status().as_u16();
-    match status {
-        401 => return Err(PolishError::Auth),
-        403 => {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(PolishError::AccessDenied(detail));
-        }
-        429 => {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(PolishError::Quota(detail));
-        }
-        code if !(200..300).contains(&code) => {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(PolishError::Network(format!("HTTP {code}: {detail}")));
-        }
-        _ => {}
+    if !(200..300).contains(&status) {
+        let detail = response.text().await.unwrap_or_default();
+        let err = match status {
+            401 => PolishError::Auth,
+            403 => PolishError::AccessDenied(detail),
+            429 => PolishError::Quota(detail),
+            code => PolishError::Network(format!("HTTP {code}: {detail}")),
+        };
+        let _ = tx.send(PolishEvent::Error(err)).await;
+        return;
     }
 
-    let parsed: ChatResponse = response
-        .json()
-        .await
-        .map_err(|e| PolishError::Network(format!("解析响应失败: {e}")))?;
-
-    let text = parsed
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    if text.is_empty() {
-        return Err(PolishError::Empty);
+    // 逐分片读取 SSE：行以 `data: ` 开头，载荷为 JSON 或 `[DONE]`；跨分片的半行用 buffer 暂存。
+    let mut response = response;
+    let mut buffer = String::new();
+    let mut emitted_any = false;
+    loop {
+        match response.chunk().await {
+            Ok(Some(bytes)) => {
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(pos) = buffer.find('\n') {
+                    let line: String = buffer.drain(..=pos).collect();
+                    let line = line.trim();
+                    let Some(payload) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    let payload = payload.trim();
+                    if payload.is_empty() || payload == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(chunk) = serde_json::from_str::<StreamChunk>(payload)
+                        && let Some(delta) = chunk.choices.into_iter().next().and_then(|c| c.delta.content)
+                        && !delta.is_empty()
+                    {
+                        emitted_any = true;
+                        if tx.send(PolishEvent::Delta(delta)).await.is_err() {
+                            return; // 接收端已关闭（面板关闭/取消）。
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let _ = tx.send(PolishEvent::Error(map_reqwest_error(e))).await;
+                return;
+            }
+        }
     }
-    Ok(text)
+
+    if emitted_any {
+        let _ = tx.send(PolishEvent::Done).await;
+    } else {
+        let _ = tx.send(PolishEvent::Error(PolishError::Empty)).await;
+    }
 }
 
 fn map_reqwest_error(e: reqwest::Error) -> PolishError {

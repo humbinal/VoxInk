@@ -307,6 +307,18 @@ polish.api_key_env_hint:
 polish.template:
   zh-CN: 润色模板
   en: Template
+polish.add_template:
+  zh-CN: 新增
+  en: Add
+polish.delete_template:
+  zh-CN: 删除
+  en: Delete
+polish.new_template_name:
+  zh-CN: 自定义模板
+  en: Custom template
+polish.name_ph:
+  zh-CN: 模板名称
+  en: Template name
 polish.prompt:
   zh-CN: 模板提示词
   en: Template prompt

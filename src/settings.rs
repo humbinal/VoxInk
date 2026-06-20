@@ -53,6 +53,7 @@ enum ShortcutSlot {
     Recording,
     Window,
     Paste,
+    MiniBar,
     // 应用内快捷键
     CopyAll,
     NewRecord,
@@ -61,10 +62,11 @@ enum ShortcutSlot {
 
 impl ShortcutSlot {
     /// 全局热键槽位（OS 级注册）。
-    const GLOBAL: [ShortcutSlot; 3] = [
+    const GLOBAL: [ShortcutSlot; 4] = [
         ShortcutSlot::Recording,
         ShortcutSlot::Window,
         ShortcutSlot::Paste,
+        ShortcutSlot::MiniBar,
     ];
     /// 应用内快捷键槽位（仅主窗口聚焦时生效）。
     const IN_APP: [ShortcutSlot; 3] = [
@@ -79,6 +81,7 @@ impl ShortcutSlot {
             ShortcutSlot::Recording => "shortcut.toggle_recording",
             ShortcutSlot::Window => "shortcut.toggle_window",
             ShortcutSlot::Paste => "shortcut.copy_paste",
+            ShortcutSlot::MiniBar => "shortcut.toggle_mini_bar",
             ShortcutSlot::CopyAll => "shortcut.copy_all",
             ShortcutSlot::NewRecord => "shortcut.new_record",
             ShortcutSlot::ToggleMode => "shortcut.toggle_mode",
@@ -91,6 +94,7 @@ impl ShortcutSlot {
             ShortcutSlot::Recording => &s.toggle_recording,
             ShortcutSlot::Window => &s.toggle_window,
             ShortcutSlot::Paste => &s.copy_and_paste,
+            ShortcutSlot::MiniBar => &s.toggle_mini_bar,
             ShortcutSlot::CopyAll => &s.app_copy_all,
             ShortcutSlot::NewRecord => &s.app_new_record,
             ShortcutSlot::ToggleMode => &s.app_toggle_mode,
@@ -102,6 +106,7 @@ impl ShortcutSlot {
             ShortcutSlot::Recording => s.toggle_recording = v,
             ShortcutSlot::Window => s.toggle_window = v,
             ShortcutSlot::Paste => s.copy_and_paste = v,
+            ShortcutSlot::MiniBar => s.toggle_mini_bar = v,
             ShortcutSlot::CopyAll => s.app_copy_all = v,
             ShortcutSlot::NewRecord => s.app_new_record = v,
             ShortcutSlot::ToggleMode => s.app_toggle_mode = v,
@@ -115,6 +120,7 @@ impl ShortcutSlot {
             ShortcutSlot::Recording => Some(HotkeyAction::ToggleRecording),
             ShortcutSlot::Window => Some(HotkeyAction::ToggleWindow),
             ShortcutSlot::Paste => Some(HotkeyAction::CopyAndPaste),
+            ShortcutSlot::MiniBar => Some(HotkeyAction::ToggleMiniBar),
             _ => None,
         }
     }

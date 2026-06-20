@@ -29,6 +29,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
     let menu = Menu::new();
     let open = MenuItem::with_id("open", "打开主界面", true, None);
     let record = MenuItem::with_id("record", "开始/停止录音", true, None);
+    let mini = MenuItem::with_id("mini", "显示/隐藏迷你条", true, None);
     let settings = MenuItem::with_id("settings", "设置", true, None);
     let quit = MenuItem::with_id("quit", "退出", true, None);
     let append = |item: &dyn tray_icon::menu::IsMenuItem| -> Result<()> {
@@ -38,6 +39,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
     append(&open)?;
     append(&PredefinedMenuItem::separator())?;
     append(&record)?;
+    append(&mini)?;
     append(&settings)?;
     append(&PredefinedMenuItem::separator())?;
     append(&quit)?;
@@ -110,6 +112,15 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                     let _ = any_window.update(cx, |_, win, app| {
                         view.update(app, |view, vcx| {
                             view.toggle_recording(win, vcx);
+                        });
+                    });
+                } else if event.id == "mini" {
+                    // 同 record：经 AnyWindowHandle::update 取 Window 而不租借 Root，
+                    // 避免与视图更新/通知双重租借。
+                    let any_window = *window;
+                    let _ = any_window.update(cx, |_, win, app| {
+                        view.update(app, |view, vcx| {
+                            view.toggle_mini_bar(win, vcx);
                         });
                     });
                 } else if event.id == "settings" {

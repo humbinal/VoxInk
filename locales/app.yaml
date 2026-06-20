@@ -241,6 +241,12 @@ shortcut.toggle_window:
 shortcut.copy_paste:
   zh-CN: 复制并粘贴到前台
   en: Copy & paste to foreground
+shortcut.toggle_mini_bar:
+  zh-CN: 显示/隐藏迷你条
+  en: Show/hide mini bar
+mini.chars_suffix:
+  zh-CN: 字
+  en: chars
 shortcut.copy_all:
   zh-CN: 复制全部文本
   en: Copy all text

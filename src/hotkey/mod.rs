@@ -32,6 +32,7 @@ pub enum HotkeyAction {
     ToggleRecording,
     ToggleWindow,
     CopyAndPaste,
+    ToggleMiniBar,
 }
 
 /// 持有热键管理器（drop 会注销所有热键），并维护「已注册 id → 动作」映射，
@@ -134,6 +135,9 @@ fn dispatch(action: HotkeyAction, view: &Entity<VoxInk>, win: &mut gpui::Window,
         HotkeyAction::CopyAndPaste => {
             view.update(app, |view, vcx| view.copy_and_paste(win, vcx));
         }
+        HotkeyAction::ToggleMiniBar => {
+            view.update(app, |view, vcx| view.toggle_mini_bar(win, vcx));
+        }
     }
 }
 
@@ -158,6 +162,11 @@ pub fn apply_shortcuts(shortcuts: &ShortcutsConfig, cx: &mut App) -> Vec<String>
             shortcuts.copy_and_paste.clone(),
             HotkeyAction::CopyAndPaste,
             "复制并粘贴",
+        ),
+        (
+            shortcuts.toggle_mini_bar.clone(),
+            HotkeyAction::ToggleMiniBar,
+            "显示/隐藏迷你条",
         ),
     ];
     let hk = cx.global_mut::<GlobalHotkeys>();

@@ -14,6 +14,7 @@ mod diagnostics;
 mod history;
 mod hotkey;
 mod i18n;
+mod mini;
 mod settings;
 mod state;
 mod theme;

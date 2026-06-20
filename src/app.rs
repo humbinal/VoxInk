@@ -16,7 +16,7 @@ use gpui::{
     deferred, div, ease_in_out, prelude::*, px, relative, white, Animation, AnimationExt, AnyElement,
     App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
-    WindowControlArea,
+    WindowControlArea, WindowHandle,
 };
 use gpui_component::{
     button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, scroll::{Scrollbar, ScrollbarShow}, v_flex, ActiveTheme,
@@ -146,6 +146,8 @@ pub struct VoxInk {
     record_scroll: ScrollHandle,
     /// 右侧录音片段列表滚动句柄（驱动可见滚动条）。
     segment_scroll: ScrollHandle,
+    /// 迷你状态条窗口句柄（None 表示尚未创建；创建后靠显隐切换，不销毁）。
+    mini_window: Option<WindowHandle<Root>>,
     /// 当前应用内回放会话（None 表示未在播放）。
     playback: Option<Playback>,
     /// 回放轮询代际（仅最新一次轮询循环生效，避免重复播放叠加多个循环）。
@@ -292,6 +294,7 @@ impl VoxInk {
             retranscribing: std::collections::HashSet::new(),
             record_scroll: ScrollHandle::new(),
             segment_scroll: ScrollHandle::new(),
+            mini_window: None,
             playback: None,
             playback_gen: 0,
             autosave_gen: 0,
@@ -1228,6 +1231,45 @@ impl VoxInk {
             // Processing 不可点击/不可切换，理论上不会到这里。
             RecordingState::Processing => {}
         }
+    }
+
+    /// 迷你状态条取用的状态快照：`(录制状态, 时长秒, 正文字数)`。
+    pub fn mini_snapshot(&self, cx: &App) -> (RecordingState, u32, usize) {
+        let chars = self.editor.read(cx).value().chars().count();
+        (
+            self.state.recording_state,
+            self.state.recording_duration_secs,
+            chars,
+        )
+    }
+
+    /// 切换迷你状态条窗口的显隐（供托盘菜单与全局快捷键调用）。
+    /// 首次调用创建窗口（置顶、底部居中），之后仅显隐切换、不销毁。
+    pub fn toggle_mini_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 全程用 App 级 defer（不借用本视图）：迷你窗创建时其首帧会 read 主视图，
+        // 若在主视图 update 内创建会触发"read while being updated"panic；defer 推迟到
+        // 当前 update 之外，亦避免嵌套窗口更新。
+        if let Some(handle) = self.mini_window {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, win, _| crate::mini::toggle_visibility(win));
+            });
+            return;
+        }
+        let main = window.window_handle();
+        let view = cx.entity();
+        cx.defer(move |cx| {
+            let handle = cx.open_window(crate::mini::window_options(), |win, cx| {
+                let mini = cx.new(|cx| crate::mini::MiniBar::new(view.clone(), main, cx));
+                cx.new(|cx| Root::new(mini, win, cx))
+            });
+            match handle {
+                Ok(handle) => {
+                    let _ = handle.update(cx, |_, win, _| crate::mini::place_topmost(win));
+                    view.update(cx, |this, _| this.mini_window = Some(handle));
+                }
+                Err(e) => tracing::error!("打开迷你条窗口失败: {e:#}"),
+            }
+        });
     }
 
     /// 一键复制并粘贴：复制全部文本到剪贴板 + 模拟粘贴到前台应用（M9 任务 9.4）。

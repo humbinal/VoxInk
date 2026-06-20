@@ -19,6 +19,7 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, v_flex, ActiveTheme,
+    Disableable,
     Icon,
     IconName,
     Root,
@@ -138,6 +139,8 @@ pub struct VoxInk {
     segments: Vec<Segment>,
     /// 是否展开右侧"录音片段"面板。
     show_segments: bool,
+    /// 正在重新转写中的片段 id 集合（用于按钮转圈 + 禁用播放/删除）。
+    retranscribing: std::collections::HashSet<String>,
     /// 设置面板覆盖层视图（M11）。
     settings: Entity<SettingsView>,
     /// 是否显示设置面板覆盖层。
@@ -269,6 +272,7 @@ impl VoxInk {
             toolbar_tip: None,
             segments,
             show_segments: false,
+            retranscribing: std::collections::HashSet::new(),
             autosave_gen: 0,
             settings,
             show_settings: false,
@@ -641,10 +645,16 @@ impl VoxInk {
             notify(window, "音频文件不存在（可能已被清理）", cx);
             return;
         }
+        // 已在转写中则忽略重复点击（按钮此时应为转圈态、不可点，这里是双保险）。
+        if !self.retranscribing.insert(seg_id.clone()) {
+            return;
+        }
         let asr_config = runtime_asr_config(cx, false);
         let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+            self.retranscribing.remove(&seg_id);
             return;
         };
+        cx.notify();
         notify(window, "重新转写中…", cx);
 
         cx.spawn_in(window, async move |this, cx| {
@@ -654,23 +664,26 @@ impl VoxInk {
                 let _ = tx.send(result);
             });
             let outcome = rx.await;
-            let _ = this.update_in(cx, |this, window, cx| match outcome {
-                Ok(Ok(text)) => {
-                    append_text(&this.editor, &text, window, cx);
-                    this.flush_editor_to_record(cx);
-                    if let Some(g) = cx.try_global::<GlobalHistory>() {
-                        // 重转写固定走离线，回填后该段标记为 offline（圆点转灰）。
-                        let _ = g.0.update_segment_transcription(&seg_id, &text, "offline");
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.retranscribing.remove(&seg_id);
+                match outcome {
+                    Ok(Ok(text)) => {
+                        append_text(&this.editor, &text, window, cx);
+                        this.flush_editor_to_record(cx);
+                        if let Some(g) = cx.try_global::<GlobalHistory>() {
+                            // 重转写固定走离线，回填后该段标记为 offline（圆点转灰）。
+                            let _ = g.0.update_segment_transcription(&seg_id, &text, "offline");
+                        }
+                        this.refresh_records(cx);
+                        this.refresh_segments(cx);
+                        notify(window, "重新转写完成", cx);
                     }
-                    this.refresh_records(cx);
-                    this.refresh_segments(cx);
-                    notify(window, "重新转写完成", cx);
+                    Ok(Err(e)) => {
+                        tracing::error!("重新转写失败: {e}");
+                        notify(window, friendly_asr_error(&e), cx);
+                    }
+                    Err(_) => notify(window, "重新转写已取消", cx),
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("重新转写失败: {e}");
-                    notify(window, friendly_asr_error(&e), cx);
-                }
-                Err(_) => notify(window, "重新转写已取消", cx),
             });
         })
         .detach();
@@ -2045,6 +2058,8 @@ impl VoxInk {
         let id_del = seg.id.clone();
         let path_play = path.clone();
         let path_re = path.clone();
+        // 该段正在重新转写：转录按钮转圈，播放/删除禁用，避免与转写竞争。
+        let busy = self.retranscribing.contains(&seg.id);
 
         h_flex()
             .id(elem_id("seg", &seg.id))
@@ -2095,6 +2110,7 @@ impl VoxInk {
                             .small()
                             .icon(IconName::Play)
                             .tooltip(tr("segments.play"))
+                            .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.play_segment(path_play.clone(), window, cx)
                             })),
@@ -2105,6 +2121,7 @@ impl VoxInk {
                             .small()
                             .icon(IconName::Redo)
                             .tooltip(tr("segments.retranscribe"))
+                            .loading(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.retranscribe_segment(
                                     id_re.clone(),
@@ -2120,6 +2137,7 @@ impl VoxInk {
                             .small()
                             .icon(IconName::Close)
                             .tooltip(tr("segments.delete"))
+                            .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.delete_segment(id_del.clone(), window, cx)
                             })),

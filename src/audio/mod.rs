@@ -9,6 +9,7 @@
 pub mod buffer;
 pub mod capture;
 pub mod chunk_sender;
+pub mod player;
 pub mod resample;
 pub mod writer;
 
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 pub use capture::{Recorder, list_input_devices};
 pub use chunk_sender::StreamingCapture;
+pub use player::Player;
 
 /// ASR 统一要求的目标采样率（§4.1）。
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;

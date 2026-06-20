@@ -68,6 +68,9 @@ cpal = "0.16"
 hound = "3"
 rubato = "0.16"
 ringbuf = "0.4"
+# 应用内音频回放（片段试听）。纯 Rust（基于 cpal），关闭自带解码器——
+# WAV 由 hound 解码后以 SamplesBuffer 喂入，仅用其播放/暂停/进度能力。
+rodio = { version = "0.20", default-features = false }
 
 # 系统集成（§1.4，M5）
 tray-icon = "0.21"

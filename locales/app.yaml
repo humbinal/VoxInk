@@ -77,6 +77,9 @@ segments.no_text:
 segments.play:
   zh-CN: 播放
   en: Play
+segments.pause:
+  zh-CN: 暂停
+  en: Pause
 segments.retranscribe:
   zh-CN: 重新转写
   en: Re-transcribe

@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    deferred, div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement,
+    deferred, div, ease_in_out, prelude::*, px, relative, white, Animation, AnimationExt, AnyElement,
     App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
     WindowControlArea,
@@ -36,7 +36,7 @@ use crate::theme::{
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{
-    list_input_devices, load_level, AudioError, LevelMeter, Recorder, StreamingCapture,
+    list_input_devices, load_level, AudioError, LevelMeter, Player, Recorder, StreamingCapture,
 };
 use crate::config::VoxInkConfig;
 use crate::history::db::{Record, Segment};
@@ -144,6 +144,10 @@ pub struct VoxInk {
     retranscribing: std::collections::HashSet<String>,
     /// 左栏记录列表滚动句柄（驱动可见滚动条）。
     record_scroll: ScrollHandle,
+    /// 当前应用内回放会话（None 表示未在播放）。
+    playback: Option<Playback>,
+    /// 回放轮询代际（仅最新一次轮询循环生效，避免重复播放叠加多个循环）。
+    playback_gen: u64,
     /// 设置面板覆盖层视图（M11）。
     settings: Entity<SettingsView>,
     /// 是否显示设置面板覆盖层。
@@ -164,6 +168,14 @@ enum ToolbarTip {
 /// 实时流式会话：持有流式采集句柄（cpal 流在主线程）。
 struct StreamingSession {
     capture: StreamingCapture,
+}
+
+/// 应用内回放会话：正在播放的片段及其播放器。
+struct Playback {
+    /// 正在播放的片段 id。
+    seg_id: String,
+    /// 回放器（持有输出流，drop 即停）。
+    player: Player,
 }
 
 /// 进行中录音的元信息：完成时据此落库 segment（持久化）或删除临时文件（不持久化）。
@@ -277,6 +289,8 @@ impl VoxInk {
             show_segments: false,
             retranscribing: std::collections::HashSet::new(),
             record_scroll: ScrollHandle::new(),
+            playback: None,
+            playback_gen: 0,
             autosave_gen: 0,
             settings,
             show_settings: false,
@@ -597,6 +611,14 @@ impl VoxInk {
             .try_global::<GlobalHistory>()
             .and_then(|g| g.0.list_segments(&self.current_record_id).ok())
             .unwrap_or_default();
+        // 正在回放的段已不在当前列表（切换记录/删除等）：停播，避免悬空播放。
+        if self
+            .playback
+            .as_ref()
+            .is_some_and(|pb| !self.segments.iter().any(|s| s.id == pb.seg_id))
+        {
+            self.stop_playback(cx);
+        }
         cx.notify();
     }
 
@@ -608,18 +630,111 @@ impl VoxInk {
         cx.notify();
     }
 
-    /// 用系统默认播放器打开音频文件（回放）。
-    fn play_segment(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        let p = PathBuf::from(&path);
-        if p.exists() {
-            cx.open_with_system(&p);
-        } else {
-            notify(window, "音频文件不存在（可能已被清理）", cx);
+    /// 应用内回放：点击正在播放的段→暂停/继续；点击其他段→从头播放该段。
+    fn play_segment(
+        &mut self,
+        seg_id: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 同一段再次点击：切换暂停/继续。
+        if let Some(pb) = &self.playback
+            && pb.seg_id == seg_id
+        {
+            pb.player.toggle_pause();
+            cx.notify();
+            return;
         }
+
+        let p = PathBuf::from(&path);
+        if !p.exists() {
+            notify(window, "音频文件不存在（可能已被清理）", cx);
+            return;
+        }
+        match Player::play_wav(&p) {
+            Ok(player) => {
+                self.playback = Some(Playback { seg_id, player });
+                self.spawn_playback_poll(cx);
+                cx.notify();
+            }
+            Err(e) => {
+                tracing::error!("回放失败: {e:#}");
+                notify(window, "回放失败（音频设备不可用？）", cx);
+            }
+        }
+    }
+
+    /// 停止应用内回放（drop 播放器即停流）。
+    fn stop_playback(&mut self, cx: &mut Context<Self>) {
+        if self.playback.take().is_some() {
+            // 让正在运行的轮询循环失效。
+            self.playback_gen += 1;
+            cx.notify();
+        }
+    }
+
+    /// 当前播放完毕后自动播放下一段；无下一段则停止。
+    fn advance_playback(&mut self, cx: &mut Context<Self>) {
+        let Some(pb) = &self.playback else { return };
+        let idx = self.segments.iter().position(|s| s.id == pb.seg_id);
+        let next = idx.and_then(|i| self.segments.get(i + 1));
+        match next {
+            Some(seg) => {
+                let (seg_id, path) = (seg.id.clone(), seg.file_path.clone());
+                match Player::play_wav(&PathBuf::from(&path)) {
+                    Ok(player) => self.playback = Some(Playback { seg_id, player }),
+                    Err(e) => {
+                        tracing::error!("自动播放下一段失败: {e:#}");
+                        self.stop_playback(cx);
+                    }
+                }
+            }
+            None => self.stop_playback(cx),
+        }
+        cx.notify();
+    }
+
+    /// 回放期间按 ~100ms 轮询：刷新进度条；当前段放完则自动切下一段（播完全部即停）。
+    fn spawn_playback_poll(&mut self, cx: &mut Context<Self>) {
+        self.playback_gen += 1;
+        let generation = self.playback_gen;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.playback_gen != generation {
+                            return false;
+                        }
+                        let finished = match &this.playback {
+                            Some(pb) => pb.player.is_finished(),
+                            None => return false,
+                        };
+                        if finished {
+                            this.advance_playback(cx);
+                        } else {
+                            cx.notify();
+                        }
+                        this.playback.is_some() && this.playback_gen == generation
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// 删除单段：删文件 + 删行 + 刷新。
     fn delete_segment(&mut self, seg_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // 正在回放的段被删除：先停播，避免播放器引用已删文件 / 自动切到错位的下一段。
+        if self.playback.as_ref().is_some_and(|pb| pb.seg_id == seg_id) {
+            self.stop_playback(cx);
+        }
         if let Some(g) = cx.try_global::<GlobalHistory>() {
             match g.0.delete_segment(&seg_id) {
                 Ok(Some(path)) => {
@@ -2078,13 +2193,27 @@ impl VoxInk {
         let path = seg.file_path.clone();
         let id_re = seg.id.clone();
         let id_del = seg.id.clone();
+        let id_play = seg.id.clone();
         let path_play = path.clone();
         let path_re = path.clone();
         // 该段正在重新转写：转录按钮转圈，播放/删除禁用，避免与转写竞争。
         let busy = self.retranscribing.contains(&seg.id);
+        // 该段是否正在回放，及其暂停态/进度（驱动 ▶/⏸ 切换与背景进度条）。
+        let pb = self.playback.as_ref().filter(|pb| pb.seg_id == seg.id);
+        let playing = pb.is_some();
+        let paused = pb.is_some_and(|pb| pb.player.is_paused());
+        let progress = pb.map(|pb| pb.player.progress()).unwrap_or(0.0);
+        let (play_icon, play_tip) = if playing && !paused {
+            (IconName::Pause, tr("segments.pause"))
+        } else {
+            (IconName::Play, tr("segments.play"))
+        };
 
         h_flex()
             .id(elem_id("seg", &seg.id))
+            // relative + overflow_hidden：让背景进度条限定在圆角矩形内。
+            .relative()
+            .overflow_hidden()
             .w_full()
             .items_center()
             .gap_2()
@@ -2092,6 +2221,18 @@ impl VoxInk {
             .py_1p5()
             .rounded(px(6.))
             .hover(|s| s.bg(cx.theme().list_hover))
+            // 背景进度条：品牌浅色填充，宽度随播放进度从左扫到右（首个子节点 → 绘于内容之下）。
+            .when(progress > 0.0, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(relative(progress))
+                        .bg(brand_tint(cx)),
+                )
+            })
             .child(
                 div()
                     .flex_shrink_0()
@@ -2130,11 +2271,16 @@ impl VoxInk {
                         Button::new(elem_id("seg-play", &seg.id))
                             .ghost()
                             .small()
-                            .icon(IconName::Play)
-                            .tooltip(tr("segments.play"))
+                            .icon(play_icon)
+                            .tooltip(play_tip)
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.play_segment(path_play.clone(), window, cx)
+                                this.play_segment(
+                                    id_play.clone(),
+                                    path_play.clone(),
+                                    window,
+                                    cx,
+                                )
                             })),
                     )
                     .child(

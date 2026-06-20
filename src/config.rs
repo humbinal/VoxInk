@@ -33,6 +33,7 @@ pub struct VoxInkConfig {
     pub text: TextConfig,
     pub storage: StorageConfig,
     pub window: WindowConfig,
+    pub polish: PolishConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +167,83 @@ pub struct WindowConfig {
     pub height: u32,
 }
 
+/// 转录后 AI 润色设置（`[polish]` 段）。
+///
+/// 单一 OpenAI 兼容客户端：用户配置 `base_url + model + api_key`（主流厂商均提供
+/// OpenAI 兼容 `/chat/completions`）。`api_key` 落盘前加密（§8.3），内存中为明文。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PolishConfig {
+    /// OpenAI 兼容 API 基址（如 `https://api.deepseek.com/v1`）。空 = 未配置。
+    pub base_url: String,
+    /// 模型名（如 `deepseek-chat`、`gpt-4o-mini`、`qwen-plus`）。
+    pub model: String,
+    /// API Key（加密落盘）。
+    pub api_key: String,
+    /// 采样温度（润色宜偏低，默认 0.3）。
+    pub temperature: f32,
+    /// 当前选用的模板 id。
+    pub active_template: String,
+    /// 润色场景模板（内置 + 用户改写）。缺省回退内置集，避免空模板列表。
+    #[serde(default = "default_polish_templates")]
+    pub templates: Vec<PolishTemplate>,
+}
+
+/// 单个润色模板：以 `prompt` 作为 system 提示词。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PolishTemplate {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+}
+
+impl PolishConfig {
+    /// 取当前选用模板（找不到则取第一个）。
+    pub fn active(&self) -> Option<&PolishTemplate> {
+        self.templates
+            .iter()
+            .find(|t| t.id == self.active_template)
+            .or_else(|| self.templates.first())
+    }
+}
+
+/// 内置默认润色模板（首次运行写入；用户可在设置内改写其提示词）。
+pub fn default_polish_templates() -> Vec<PolishTemplate> {
+    let t = |id: &str, name: &str, prompt: &str| PolishTemplate {
+        id: id.to_string(),
+        name: name.to_string(),
+        prompt: prompt.to_string(),
+    };
+    vec![
+        t(
+            "general",
+            "通用润色",
+            "你是中文文字润色助手。请在不改变原意的前提下，修正语音转写文本中的错别字、断句与标点，去除口语赘词与重复，使其通顺自然。只输出润色后的正文，不要解释。",
+        ),
+        t(
+            "written",
+            "口语转书面",
+            "请把下面这段口语化的语音转写整理成书面、正式的表达：去除语气词与重复，规范用词与标点，保持原意。只输出整理后的正文。",
+        ),
+        t(
+            "meeting",
+            "会议纪要",
+            "请把下面的语音转写整理成结构化会议纪要：用要点列出关键决议、讨论事项与待办（含负责人/时间，如有）。只输出纪要正文。",
+        ),
+        t(
+            "todo",
+            "待办清单",
+            "请从下面的语音转写中提炼出可执行的待办清单，用简洁的条目列出，每条一个动作。只输出清单。",
+        ),
+        t(
+            "email",
+            "邮件",
+            "请把下面的语音转写改写成一封措辞得体、条理清晰的中文邮件（含称呼与结尾），保持原意。只输出邮件正文。",
+        ),
+    ]
+}
+
 // ───────────────────────────── 默认值（§2.7）─────────────────────────────
 
 impl Default for VoxInkConfig {
@@ -179,6 +257,20 @@ impl Default for VoxInkConfig {
             text: TextConfig::default(),
             storage: StorageConfig::default(),
             window: WindowConfig::default(),
+            polish: PolishConfig::default(),
+        }
+    }
+}
+
+impl Default for PolishConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            model: String::new(),
+            api_key: String::new(),
+            temperature: 0.3,
+            active_template: "general".to_string(),
+            templates: default_polish_templates(),
         }
     }
 }
@@ -319,6 +411,15 @@ impl VoxInkConfig {
             }
         }
 
+        // 解密润色 API Key。
+        match decrypt_api_key(&config.polish.api_key) {
+            Ok(plain) => config.polish.api_key = plain,
+            Err(e) => {
+                tracing::warn!("润色 api_key 解密失败（可能更换了设备），已清空: {e:#}");
+                config.polish.api_key.clear();
+            }
+        }
+
         config
     }
 
@@ -336,6 +437,7 @@ impl VoxInkConfig {
             b.api_key = encrypt_api_key(&b.api_key)?;
             b.oss_access_key_secret = encrypt_api_key(&b.oss_access_key_secret)?;
         }
+        to_store.polish.api_key = encrypt_api_key(&to_store.polish.api_key)?;
 
         let text = toml::to_string_pretty(&to_store).context("序列化配置为 TOML 失败")?;
         fs::write(&path, text).with_context(|| format!("写入配置失败: {}", path.display()))?;

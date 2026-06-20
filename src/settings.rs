@@ -131,6 +131,7 @@ impl ShortcutSlot {
 enum SettingsTab {
     Asr,
     Recording,
+    Polish,
     General,
     Shortcuts,
     Data,
@@ -139,9 +140,10 @@ enum SettingsTab {
 
 impl SettingsTab {
     /// 左侧栏顺序与对应标题 locale key。
-    const ALL: [(SettingsTab, &'static str); 6] = [
+    const ALL: [(SettingsTab, &'static str); 7] = [
         (SettingsTab::Asr, "settings.section.asr"),
         (SettingsTab::Recording, "settings.section.recording"),
+        (SettingsTab::Polish, "settings.section.polish"),
         (SettingsTab::General, "settings.section.general"),
         (SettingsTab::Shortcuts, "settings.section.shortcuts"),
         (SettingsTab::Data, "settings.section.data"),
@@ -169,6 +171,14 @@ pub struct SettingsView {
     text_retention: Entity<InputState>,
     /// 音频根目录当前占用字节数（打开设置/清理后刷新）。
     audio_usage_bytes: u64,
+    // AI 润色
+    polish_base_url: Entity<InputState>,
+    polish_model: Entity<InputState>,
+    polish_api_key: Entity<InputState>,
+    /// 当前编辑/选用的润色模板提示词（多行）。
+    polish_prompt: Entity<InputState>,
+    /// 当前编辑/选用的润色模板 id。
+    polish_edit_template: String,
     /// 当前选中的分类标签。
     active_tab: SettingsTab,
     /// 内容区滚动句柄（驱动可见滚动条）。
@@ -203,6 +213,18 @@ impl SettingsView {
             audio_retention: input(window, cx),
             text_retention: input(window, cx),
             audio_usage_bytes: 0,
+            polish_base_url: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(tr("polish.base_url_ph"))
+                    .multi_line(true)
+                    .auto_grow(2, 3)
+            }),
+            polish_model: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr("polish.model_ph"))),
+            polish_api_key: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr("settings.api_key_ph"))),
+            polish_prompt: cx.new(|cx| InputState::new(window, cx).multi_line(true).auto_grow(3, 8)),
+            polish_edit_template: String::new(),
             active_tab: SettingsTab::Asr,
             scroll: ScrollHandle::new(),
             capture_focus: cx.focus_handle(),
@@ -234,6 +256,30 @@ impl SettingsView {
             .unwrap_or(0);
         self.load_stream_inputs(&c, window, cx);
         self.load_offline_inputs(&c, window, cx);
+        self.load_polish_inputs(&c, window, cx);
+    }
+
+    fn load_polish_inputs(
+        &mut self,
+        c: &VoxInkConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.polish_base_url
+            .update(cx, |s, cx| s.set_value(c.polish.base_url.clone(), window, cx));
+        self.polish_model
+            .update(cx, |s, cx| s.set_value(c.polish.model.clone(), window, cx));
+        self.polish_api_key
+            .update(cx, |s, cx| s.set_value(c.polish.api_key.clone(), window, cx));
+        // 选用当前模板并载入其提示词。
+        let tpl = c
+            .polish
+            .active()
+            .cloned()
+            .unwrap_or_default();
+        self.polish_edit_template = tpl.id.clone();
+        self.polish_prompt
+            .update(cx, |s, cx| s.set_value(tpl.prompt.clone(), window, cx));
     }
 
     fn load_stream_inputs(
@@ -295,7 +341,23 @@ impl SettingsView {
         let audio_dir = self.audio_dir.read(cx).value().to_string();
         let audio_retention = self.audio_retention.read(cx).value().to_string();
         let text_retention = self.text_retention.read(cx).value().to_string();
+        let p_base = self.polish_base_url.read(cx).value().to_string();
+        let p_model = self.polish_model.read(cx).value().to_string();
+        let p_key = self.polish_api_key.read(cx).value().to_string();
+        let p_prompt = self.polish_prompt.read(cx).value().to_string();
+        let p_tpl = self.polish_edit_template.clone();
 
+        self.update_config(cx, |c| {
+            c.polish.base_url = p_base.trim().to_string();
+            c.polish.model = p_model.trim().to_string();
+            c.polish.api_key = p_key.trim().to_string();
+            if !p_tpl.is_empty() {
+                c.polish.active_template = p_tpl.clone();
+                if let Some(t) = c.polish.templates.iter_mut().find(|t| t.id == p_tpl) {
+                    t.prompt = p_prompt.clone();
+                }
+            }
+        });
         self.update_config(cx, |c| {
             c.storage.audio_dir = audio_dir.trim().to_string();
             if let Ok(n) = audio_retention.trim().parse::<u32>() {
@@ -531,7 +593,11 @@ impl SettingsView {
     fn tab_is_editable(&self) -> bool {
         matches!(
             self.active_tab,
-            SettingsTab::Asr | SettingsTab::Recording | SettingsTab::General | SettingsTab::Data
+            SettingsTab::Asr
+                | SettingsTab::Recording
+                | SettingsTab::Polish
+                | SettingsTab::General
+                | SettingsTab::Data
         )
     }
 
@@ -768,6 +834,102 @@ impl SettingsView {
             )
     }
 
+    /// AI 润色设置区：厂商预设 + base_url/model/key + 模板选择与提示词编辑。
+    fn render_polish_settings(
+        &self,
+        cfg: &VoxInkConfig,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // 厂商预设：点击填充 base_url。
+        let mut presets = h_flex().w_full().flex_wrap().gap_1p5();
+        for (i, (name, url)) in crate::polish::PROVIDER_PRESETS.iter().enumerate() {
+            let url = url.to_string();
+            presets = presets.child(
+                Button::new(("polish-preset", i))
+                    .outline()
+                    .small()
+                    .label(name.to_string())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.polish_base_url
+                            .update(cx, |s, cx| s.set_value(url.clone(), window, cx));
+                        cx.notify();
+                    })),
+            );
+        }
+
+        // 模板选择：切换前先把当前模板的提示词编辑存回配置，避免丢失。
+        let mut tpls = h_flex().w_full().flex_wrap().gap_1p5();
+        for (i, t) in cfg.polish.templates.iter().enumerate() {
+            let id = t.id.clone();
+            let selected = t.id == self.polish_edit_template;
+            tpls = tpls.child(
+                Button::new(("polish-tpl", i))
+                    .small()
+                    .when(selected, |b| b.primary())
+                    .when(!selected, |b| b.outline())
+                    .label(t.name.clone())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let cur = this.polish_edit_template.clone();
+                        let cur_prompt = this.polish_prompt.read(cx).value().to_string();
+                        this.update_config(cx, |c| {
+                            if let Some(t) = c.polish.templates.iter_mut().find(|t| t.id == cur) {
+                                t.prompt = cur_prompt;
+                            }
+                        });
+                        let new_prompt = cx
+                            .try_global::<GlobalConfig>()
+                            .and_then(|g| {
+                                g.0.polish
+                                    .templates
+                                    .iter()
+                                    .find(|t| t.id == id)
+                                    .map(|t| t.prompt.clone())
+                            })
+                            .unwrap_or_default();
+                        this.polish_edit_template = id.clone();
+                        this.polish_prompt
+                            .update(cx, |s, cx| s.set_value(new_prompt, window, cx));
+                        cx.notify();
+                    })),
+            );
+        }
+
+        // 全部用整行输入（标签在上、输入框占满宽度），避免固定窄宽把长 URL 截断。
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(self.field_label("polish.preset", cx))
+            .child(presets)
+            .child(self.field_label("polish.base_url", cx))
+            .child(Input::new(&self.polish_base_url))
+            .child(self.field_label("polish.model", cx))
+            .child(Input::new(&self.polish_model).small())
+            .child(self.field_label("polish.api_key", cx))
+            .child(Input::new(&self.polish_api_key).small())
+            .child(
+                div()
+                    .pt_0p5()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{}{}",
+                        tr("polish.api_key_env_hint"),
+                        crate::polish::api_key_env_var(&self.polish_base_url.read(cx).value())
+                    )),
+            )
+            .child(self.field_label("polish.template", cx))
+            .child(tpls)
+            .child(self.field_label("polish.prompt", cx))
+            .child(Input::new(&self.polish_prompt))
+            .child(
+                div()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr("polish.settings_hint")),
+            )
+    }
+
     /// 「测试连接」按钮行：右对齐、按钮取自然宽度（不占整行）。
     fn test_button(
         &self,
@@ -899,6 +1061,8 @@ impl Render for SettingsView {
             .justify_start()
             .gap_1()
             .px_4()
+            // 右侧多留出滚动条宽度，避免整行内容（如润色厂商 chips）被滚动条遮挡裁切。
+            .pr_6()
             .py_2()
             .text_size(px(13.))
             .overflow_y_scroll()
@@ -1022,6 +1186,10 @@ impl Render for SettingsView {
                         div().w(px(120.)).child(Input::new(&self.max_secs).small()),
                     ))
                     .child(self.segment_legend(cx))
+            })
+            // ── AI 润色 ──
+            .when(self.active_tab == SettingsTab::Polish, |this| {
+                this.child(self.render_polish_settings(&cfg, cx))
             })
             // ── 通用 ──
             .when(self.active_tab == SettingsTab::General, |this| {
@@ -1238,6 +1406,9 @@ impl Render for SettingsView {
                                 div()
                                     .relative()
                                     .flex_1()
+                                    // min_w_0：否则长内容（URL/提示文字/整行输入）会把内容区
+                                    // 撑出对话框右边界、整列被裁切（CLAUDE.md 既有坑）。
+                                    .min_w_0()
                                     .h_full()
                                     .min_h_0()
                                     .child(body)

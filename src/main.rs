@@ -15,6 +15,7 @@ mod history;
 mod hotkey;
 mod i18n;
 mod mini;
+mod polish;
 mod settings;
 mod state;
 mod theme;

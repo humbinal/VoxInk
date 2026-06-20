@@ -244,6 +244,75 @@ shortcut.copy_paste:
 shortcut.toggle_mini_bar:
   zh-CN: 显示/隐藏迷你条
   en: Show/hide mini bar
+polish.button:
+  zh-CN: AI 润色
+  en: AI Polish
+polish.tooltip:
+  zh-CN: 用 AI 润色当前转写文本
+  en: Polish the transcript with AI
+polish.title:
+  zh-CN: AI 润色
+  en: AI Polish
+polish.run:
+  zh-CN: 润色
+  en: Polish
+polish.running:
+  zh-CN: 润色中…
+  en: Polishing…
+polish.result_placeholder:
+  zh-CN: 选择模板后点击「润色」生成结果
+  en: Pick a template and click Polish
+polish.original:
+  zh-CN: 原文
+  en: Original
+polish.result:
+  zh-CN: 润色结果
+  en: Polished
+polish.apply:
+  zh-CN: 应用到正文
+  en: Apply
+polish.save_as_new:
+  zh-CN: 另存为新记录
+  en: Save as new
+polish.copy:
+  zh-CN: 复制
+  en: Copy
+polish.discard:
+  zh-CN: 放弃
+  en: Discard
+settings.section.polish:
+  zh-CN: AI 润色
+  en: AI Polish
+polish.preset:
+  zh-CN: 厂商预设
+  en: Provider preset
+polish.base_url:
+  zh-CN: 接口地址
+  en: Base URL
+polish.base_url_ph:
+  zh-CN: 如 https://api.deepseek.com/v1
+  en: e.g. https://api.deepseek.com/v1
+polish.model:
+  zh-CN: 模型
+  en: Model
+polish.model_ph:
+  zh-CN: 如 deepseek-chat
+  en: e.g. deepseek-chat
+polish.api_key:
+  zh-CN: API Key
+  en: API Key
+polish.api_key_env_hint:
+  zh-CN: 可选；留空则回退环境变量：
+  en: "Optional; falls back to env var if empty: "
+polish.template:
+  zh-CN: 润色模板
+  en: Template
+polish.prompt:
+  zh-CN: 模板提示词
+  en: Template prompt
+polish.settings_hint:
+  zh-CN: 主流厂商均提供 OpenAI 兼容接口；选预设填地址，再填模型与 API Key。提示词改动在关闭设置后生效。
+  en: Most providers offer OpenAI-compatible APIs. Pick a preset, then set model & API Key. Prompt edits apply after closing settings.
 mini.chars_suffix:
   zh-CN: 字
   en: chars

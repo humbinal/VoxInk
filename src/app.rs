@@ -42,6 +42,7 @@ use crate::config::VoxInkConfig;
 use crate::history::db::{Record, Segment};
 use crate::history::GlobalHistory;
 use crate::i18n::tr;
+use crate::polish::{self, PolishRequest};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::state::{AppState, RecordingState, TranscriptionMode};
 
@@ -158,6 +159,18 @@ pub struct VoxInk {
     settings: Entity<SettingsView>,
     /// 是否显示设置面板覆盖层。
     show_settings: bool,
+    /// 是否显示 AI 润色对比覆盖层。
+    show_polish: bool,
+    /// 润色请求进行中。
+    polish_loading: bool,
+    /// 打开润色面板时快照的原文（左栏对照；应用前原文不丢）。
+    polish_original: String,
+    /// 润色结果（None=未生成）。
+    polish_result: Option<String>,
+    /// 润色失败提示。
+    polish_error: Option<String>,
+    /// 当前选中的润色模板 id。
+    polish_template_id: String,
     /// 订阅句柄（编辑器/搜索/设置事件）保活。
     _subs: Vec<Subscription>,
 }
@@ -303,6 +316,12 @@ impl VoxInk {
             autosave_gen: 0,
             settings,
             show_settings: false,
+            show_polish: false,
+            polish_loading: false,
+            polish_original: String::new(),
+            polish_result: None,
+            polish_error: None,
+            polish_template_id: String::new(),
             _subs: vec![editor_sub, search_sub, settings_sub],
         }
     }
@@ -1323,6 +1342,159 @@ impl VoxInk {
         }
     }
 
+    // ───────────────────────────── AI 润色（IDEAS）─────────────────────────────
+
+    fn on_open_polish(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            notify(window, "当前没有可润色的文本", cx);
+            return;
+        }
+        // 快照原文（应用前不丢），默认选用配置里的当前模板。
+        self.polish_original = text;
+        self.polish_template_id = cx
+            .try_global::<GlobalConfig>()
+            .map(|g| g.0.polish.active_template.clone())
+            .unwrap_or_default();
+        self.polish_result = None;
+        self.polish_error = None;
+        self.polish_loading = false;
+        self.show_polish = true;
+        cx.notify();
+    }
+
+    fn close_polish(&mut self, cx: &mut Context<Self>) {
+        self.show_polish = false;
+        cx.notify();
+    }
+
+    /// 调用 LLM 润色当前原文（异步；结果回填到对比面板，不动正文）。
+    fn run_polish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cfg) = cx.try_global::<GlobalConfig>().map(|g| g.0.polish.clone()) else {
+            return;
+        };
+        // 逐项校验并给出**具体**缺失项（避免笼统的"未配置"无法定位）。
+        if cfg.base_url.trim().is_empty() {
+            self.polish_error = Some("未配置接口地址（设置 → AI 润色 → 接口地址）".to_string());
+            cx.notify();
+            return;
+        }
+        if cfg.model.trim().is_empty() {
+            self.polish_error = Some("未配置模型（切换厂商后需手动填写对应模型名）".to_string());
+            cx.notify();
+            return;
+        }
+        // API Key 未配置时回退对应厂商的环境变量（见 polish::api_key_env_var）。
+        let env_name = polish::api_key_env_var(&cfg.base_url);
+        let api_key = if cfg.api_key.trim().is_empty() {
+            std::env::var(env_name).unwrap_or_default()
+        } else {
+            cfg.api_key.clone()
+        };
+        if api_key.trim().is_empty() {
+            self.polish_error = Some(format!(
+                "未配置 API Key，且未读取到环境变量 {env_name}（若刚设置环境变量，需重启应用才生效）"
+            ));
+            cx.notify();
+            return;
+        }
+        let prompt = cfg
+            .templates
+            .iter()
+            .find(|t| t.id == self.polish_template_id)
+            .or_else(|| cfg.active())
+            .map(|t| t.prompt.clone())
+            .unwrap_or_default();
+        let text = self.polish_original.clone();
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+            return;
+        };
+
+        self.polish_loading = true;
+        self.polish_error = None;
+        self.polish_result = None;
+        cx.notify();
+
+        let req = PolishRequest {
+            base_url: cfg.base_url,
+            model: cfg.model,
+            api_key,
+            temperature: cfg.temperature,
+            system_prompt: prompt,
+            text,
+        };
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            handle.spawn(async move {
+                let client = polish::build_client();
+                let _ = tx.send(polish::polish(&client, req).await);
+            });
+            let outcome = rx.await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.polish_loading = false;
+                match outcome {
+                    Ok(Ok(text)) => this.polish_result = Some(text),
+                    Ok(Err(e)) => this.polish_error = Some(e.to_string()),
+                    Err(_) => this.polish_error = Some("润色已取消".to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 用润色结果覆盖当前记录正文。
+    fn apply_polish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(result) = self.polish_result.clone() else {
+            return;
+        };
+        self.editor
+            .update(cx, |s, cx| s.set_value(result, window, cx));
+        self.flush_editor_to_record(cx);
+        self.refresh_records(cx);
+        self.show_polish = false;
+        notify(window, "已应用润色结果", cx);
+    }
+
+    /// 把润色结果另存为新记录（原记录保持不变，零丢失）。
+    fn save_polish_as_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(result) = self.polish_result.clone() else {
+            return;
+        };
+        self.flush_editor_to_record(cx); // 先存当前记录
+        let new_rec = cx
+            .try_global::<GlobalHistory>()
+            .and_then(|g| g.0.create_record().ok());
+        let Some(new_rec) = new_rec else {
+            notify(window, "新建记录失败", cx);
+            return;
+        };
+        self.current_record_id = new_rec.id;
+        self.editor
+            .update(cx, |s, cx| s.set_value(result, window, cx));
+        self.flush_editor_to_record(cx);
+        self.refresh_records(cx);
+        self.refresh_segments(cx);
+        self.show_polish = false;
+        notify(window, "已另存为新记录", cx);
+    }
+
+    fn copy_polish_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(result) = &self.polish_result {
+            match copy_to_clipboard(result) {
+                Ok(()) => notify(window, "已复制润色结果", cx),
+                Err(e) => {
+                    tracing::error!("复制润色结果失败: {e:#}");
+                    notify(window, "复制失败", cx);
+                }
+            }
+        }
+    }
+
     /// 一键复制并粘贴：复制全部文本到剪贴板 + 模拟粘贴到前台应用（M9 任务 9.4）。
     /// 供全局快捷键 `copy_and_paste` 调用；典型场景是焦点在其它应用、VoxInk 隐藏于托盘。
     pub fn copy_and_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2225,6 +2397,16 @@ impl VoxInk {
                             .tooltip(tr("footer.open_recordings"))
                             .on_click(cx.listener(Self::on_open_recordings)),
                     )
+                    .child(
+                        Button::new("ai-polish")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Bot)
+                            .label(tr("polish.button"))
+                            .tooltip(tr("polish.tooltip"))
+                            .disabled(!self.is_idle())
+                            .on_click(cx.listener(Self::on_open_polish)),
+                    )
                     .child(format!("{} {char_count}", tr("footer.words"))),
             )
             .child(
@@ -2242,6 +2424,232 @@ impl VoxInk {
                         tr("footer.copy")
                     })
                     .on_click(cx.listener(Self::on_copy)),
+            )
+    }
+
+    /// AI 润色对比覆盖层：左原文 / 右润色结果 + 模板选择 + 应用/另存/复制/关闭。
+    fn render_polish_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let templates = cx
+            .try_global::<GlobalConfig>()
+            .map(|g| g.0.polish.templates.clone())
+            .unwrap_or_default();
+        let has_result = self.polish_result.is_some();
+
+        // 模板选择 chips。
+        let mut chips = h_flex().flex_wrap().gap_1p5();
+        for t in &templates {
+            let id = t.id.clone();
+            let selected = t.id == self.polish_template_id;
+            chips = chips.child(
+                Button::new(elem_id("polish-tpl", &t.id))
+                    .small()
+                    .when(selected, |b| b.primary())
+                    .when(!selected, |b| b.outline())
+                    .label(t.name.clone())
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.polish_template_id = id.clone();
+                        cx.notify();
+                    })),
+            );
+        }
+
+        // 右栏结果区内容：加载中 / 错误 / 结果 / 占位。
+        let result_body: AnyElement = if self.polish_loading {
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr("polish.running"))
+                .into_any_element()
+        } else if let Some(err) = &self.polish_error {
+            div()
+                .text_sm()
+                .text_color(DANGER)
+                .child(err.clone())
+                .into_any_element()
+        } else if let Some(result) = &self.polish_result {
+            div().text_sm().child(result.clone()).into_any_element()
+        } else {
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(tr("polish.result_placeholder"))
+                .into_any_element()
+        };
+
+        let muted = cx.theme().muted_foreground;
+
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(gpui::hsla(0., 0., 0., 0.45))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                v_flex()
+                    .w(relative(0.88))
+                    .h(relative(0.86))
+                    .bg(cx.theme().background)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(12.))
+                    .overflow_hidden()
+                    // 头部：标题 + 关闭。
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(tr("polish.title")),
+                            )
+                            .child(
+                                Button::new("polish-close")
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .on_click(cx.listener(|this, _, _w, cx| this.close_polish(cx))),
+                            ),
+                    )
+                    // 工具条：模板 chips + 润色按钮。
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(chips)
+                            .child(
+                                Button::new("polish-run")
+                                    .primary()
+                                    .icon(IconName::Bot)
+                                    .label(tr("polish.run"))
+                                    .loading(self.polish_loading)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.run_polish(window, cx)
+                                    })),
+                            ),
+                    )
+                    // 主体：左原文 / 右结果。
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .border_r_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        div()
+                                            .px_4()
+                                            .py_2()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(muted)
+                                            .child(tr("polish.original")),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("polish-original")
+                                            .flex_1()
+                                            .min_h_0()
+                                            .w_full()
+                                            .px_4()
+                                            .pb_3()
+                                            .text_sm()
+                                            .overflow_y_scroll()
+                                            .child(self.polish_original.clone()),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(
+                                        div()
+                                            .px_4()
+                                            .py_2()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(BRAND)
+                                            .child(tr("polish.result")),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("polish-result")
+                                            .flex_1()
+                                            .min_h_0()
+                                            .w_full()
+                                            .px_4()
+                                            .pb_3()
+                                            .overflow_y_scroll()
+                                            .child(result_body),
+                                    ),
+                            ),
+                    )
+                    // 底部操作。
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .px_4()
+                            .py_3()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                Button::new("polish-cancel")
+                                    .ghost()
+                                    .label(tr("polish.discard"))
+                                    .on_click(cx.listener(|this, _, _w, cx| this.close_polish(cx))),
+                            )
+                            .child(
+                                Button::new("polish-copy")
+                                    .outline()
+                                    .icon(IconName::Copy)
+                                    .label(tr("polish.copy"))
+                                    .disabled(!has_result)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.copy_polish_result(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("polish-save-new")
+                                    .outline()
+                                    .label(tr("polish.save_as_new"))
+                                    .disabled(!has_result)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.save_polish_as_new(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("polish-apply")
+                                    .primary()
+                                    .icon(IconName::Check)
+                                    .label(tr("polish.apply"))
+                                    .disabled(!has_result)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.apply_polish(window, cx)
+                                    })),
+                            ),
+                    ),
             )
     }
 
@@ -2493,7 +2901,11 @@ impl Render for VoxInk {
                                 ),
                             )
                             // 设置面板覆盖层（M11）：盖住内容区，标题栏仍可用。
-                            .when(self.show_settings, |this| this.child(self.settings.clone())),
+                            .when(self.show_settings, |this| this.child(self.settings.clone()))
+                            // AI 润色对比覆盖层。
+                            .when(self.show_polish, |this| {
+                                this.child(self.render_polish_overlay(cx))
+                            }),
                     ),
             )
             .children(notification_layer)

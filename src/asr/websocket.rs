@@ -34,17 +34,20 @@ pub async fn connect(url: &str, api_key: &str) -> Result<WsStream, AsrError> {
 }
 
 /// 非 DashScope 的 WebSocket 连接（自建服务用）。仅当 `api_key` 非空时附加
-/// `Authorization: Bearer <key>`；不发送任何 DashScope 专属头（区别于 [`connect`]）。
+/// `X-NLS-Token: <key>` 头；不发送任何 DashScope 专属头（区别于 [`connect`]）。
+///
+/// 注意：自建 qwen3-asr 服务的 WS 鉴权只认 `X-NLS-Token` 头或 `token` 查询参数，
+/// **不读 `Authorization: Bearer`**（见服务端 `core/security.py::extract_websocket_token`）。
+/// 故此处用 `X-NLS-Token` 而非 Bearer，与 HTTP 侧（reqwest `bearer_auth`）有意不同。
 pub async fn connect_plain(url: &str, api_key: &str) -> Result<WsStream, AsrError> {
     let mut request = url
         .into_client_request()
         .map_err(|e| AsrError::WebSocketError(format!("构造 WS 请求失败: {e}")))?;
 
     if !api_key.is_empty() {
-        let bearer = format!("Bearer {api_key}");
         request.headers_mut().insert(
-            "Authorization",
-            HeaderValue::from_str(&bearer)
+            "X-NLS-Token",
+            HeaderValue::from_str(api_key)
                 .map_err(|e| AsrError::WebSocketError(format!("无效鉴权头: {e}")))?,
         );
     }

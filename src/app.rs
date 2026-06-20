@@ -13,12 +13,12 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement, App,
-    ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent, ParentElement,
-    Render, SharedString, Styled, Subscription, Window, WindowControlArea,
+    deferred, div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement,
+    App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, WindowControlArea,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, v_flex, ActiveTheme, Disableable,
+    button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, v_flex, ActiveTheme,
     Icon,
     IconName,
     Root,
@@ -34,7 +34,7 @@ use crate::theme::{
 use crate::asr::traits::StreamingResult;
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{
-    list_input_devices, load_level, AudioError, LevelMeter, MicProbe, Recorder, StreamingCapture,
+    list_input_devices, load_level, AudioError, LevelMeter, Recorder, StreamingCapture,
 };
 use crate::config::VoxInkConfig;
 use crate::history::db::{Record, Segment};
@@ -130,10 +130,8 @@ pub struct VoxInk {
     mic_devices: Vec<String>,
     /// 麦克风下拉是否展开。
     mic_dropdown_open: bool,
-    /// 是否正在做麦克风可用性测试。
-    mic_testing: bool,
-    /// 测试期间的探测句柄（保持采集流存活；结束/drop 即停止）。
-    mic_probe: Option<MicProbe>,
+    /// 顶部工具条上正在 hover 的控件（驱动自绘提示气泡显示）。
+    toolbar_tip: Option<ToolbarTip>,
     /// 自动保存防抖代际计数（仅最新一次定时器生效）。
     autosave_gen: u64,
     /// 当前记录的录音片段列表（随记录切换/录制/删除刷新）。
@@ -146,6 +144,15 @@ pub struct VoxInk {
     show_settings: bool,
     /// 订阅句柄（编辑器/搜索/设置事件）保活。
     _subs: Vec<Subscription>,
+}
+
+/// 顶部工具条上正在 hover、需显示自绘提示气泡的控件（同一时刻至多一个）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolbarTip {
+    /// 模式切换。
+    Mode,
+    /// 麦克风选择。
+    Mic,
 }
 
 /// 实时流式会话：持有流式采集句柄（cpal 流在主线程）。
@@ -259,8 +266,7 @@ impl VoxInk {
             levels: Vec::new(),
             mic_devices: list_input_devices(),
             mic_dropdown_open: false,
-            mic_testing: false,
-            mic_probe: None,
+            toolbar_tip: None,
             segments,
             show_segments: false,
             autosave_gen: 0,
@@ -464,7 +470,7 @@ impl VoxInk {
             .unwrap_or(600)
     }
 
-    // ───────────────────────────── 麦克风选择 / 测试（2026-06-19）─────────────────────────────
+    // ───────────────────────────── 麦克风选择（2026-06-19）─────────────────────────────
 
     /// 当前配置的首选麦克风名（空 = 系统默认 → None）。
     fn configured_input_device(&self, cx: &Context<Self>) -> Option<String> {
@@ -501,87 +507,6 @@ impl VoxInk {
             c.audio.input_device = name;
             cx.set_global(GlobalConfig(c));
         }
-        cx.notify();
-    }
-
-    /// 测试当前麦克风可用性：打开探测流，实时显示电平约 1.7s，结束后据峰值给出结论。
-    fn on_test_mic(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_idle() {
-            notify(window, tr("mic.busy"), cx);
-            return;
-        }
-        if self.mic_testing {
-            return;
-        }
-        let device = self.configured_input_device(cx);
-        let level: LevelMeter = Arc::new(AtomicU32::new(0));
-        match MicProbe::start(device, level.clone()) {
-            Ok(probe) => {
-                self.mic_probe = Some(probe);
-                self.mic_testing = true;
-                self.mic_dropdown_open = false;
-                self.level_meter = level;
-                self.levels.clear();
-                cx.notify();
-                self.spawn_mic_test_poll(window, cx);
-            }
-            Err(e) => {
-                tracing::error!("麦克风测试失败: {e}");
-                let msg = match e {
-                    AudioError::NoInputDevice => tr("mic.test_no_device"),
-                    _ => tr("mic.test_failed"),
-                };
-                notify(window, msg, cx);
-            }
-        }
-    }
-
-    /// 测试期间 ~60ms 轮询电平、绘制实时波形；约 1.7s 后收尾评估。
-    fn spawn_mic_test_poll(&self, window: &mut Window, cx: &mut Context<Self>) {
-        cx.spawn_in(window, async move |this, cx| {
-            let mut ticks = 0u32;
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(60))
-                    .await;
-                ticks += 1;
-                let alive = this
-                    .update(cx, |this, cx| {
-                        if !this.mic_testing {
-                            return false;
-                        }
-                        this.push_level(load_level(&this.level_meter));
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !alive || ticks >= 28 {
-                    break;
-                }
-            }
-            let _ = this.update_in(cx, |this, window, cx| this.finish_mic_test(window, cx));
-        })
-        .detach();
-    }
-
-    /// 收尾麦克风测试：停止探测，据峰值电平给出"正常/无信号"提示。
-    fn finish_mic_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(probe) = self.mic_probe.take() {
-            probe.stop();
-        }
-        if !self.mic_testing {
-            return;
-        }
-        let peak = self.levels.iter().copied().fold(0.0_f32, f32::max);
-        self.mic_testing = false;
-        self.levels.clear();
-        // RMS 阈值：安静环境本底噪声约 0.001~0.002，说话可达 0.02+，0.005 作"有无信号"分界。
-        let msg = if peak < 0.005 {
-            tr("mic.test_no_signal")
-        } else {
-            tr("mic.test_ok")
-        };
-        notify(window, msg, cx);
         cx.notify();
     }
 
@@ -1340,6 +1265,7 @@ impl VoxInk {
     /// 当成 HTCAPTION，其子元素的点击会被系统当成拖窗而吞掉。故齿轮/窗口按钮独立成兄弟节点。
     fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = !self.is_idle();
+        let recording = self.state.recording_state == RecordingState::Recording;
         let (status_text, status_color) = self.status();
         let max_icon = if window.is_maximized() {
             IconName::WindowRestore
@@ -1426,7 +1352,9 @@ impl VoxInk {
                 true,
                 cx,
             ))
-            // 状态胶囊：仅录音/处理时浮现，绝对居中于整条标题栏（更优雅；纯展示、不挡拖拽与按钮）。
+            // 状态胶囊 + 录音波形：仅录音/处理时浮现，绝对居中于整条标题栏
+            //（更优雅；纯展示、无 window_control_area 故不挡拖拽与按钮）。
+            // 波形置于「录音中」气泡右侧，仅录音中显示（处理阶段无电平）。
             .when(active, |this| {
                 this.child(
                     div()
@@ -1437,17 +1365,27 @@ impl VoxInk {
                         .justify_center()
                         .child(
                             h_flex()
-                                .gap_1p5()
+                                .gap_2()
                                 .items_center()
-                                .px_2p5()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(cx.theme().muted)
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(div().size(px(6.)).rounded_full().bg(status_color))
-                                .child(status_text)
-                                .child(div().font_family("Consolas").child(self.duration_label())),
+                                .child(
+                                    h_flex()
+                                        .gap_1p5()
+                                        .items_center()
+                                        .px_2p5()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(cx.theme().muted)
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(div().size(px(6.)).rounded_full().bg(status_color))
+                                        .child(status_text)
+                                        .child(
+                                            div()
+                                                .font_family("Consolas")
+                                                .child(self.duration_label()),
+                                        ),
+                                )
+                                .when(recording, |row| row.child(self.render_titlebar_waveform())),
                         ),
                 )
             })
@@ -1669,14 +1607,15 @@ impl VoxInk {
                 ),
             };
 
+        // 行高与「模式切换」开关对齐（≈20px），与单行工具条其它控件同处一行。
         let mut button = h_flex()
             .id("record-button")
             .items_center()
             .justify_center()
             .gap_1p5()
-            .w(px(140.))
-            .h(px(34.))
-            .rounded(px(8.))
+            .w(px(104.))
+            .h(px(24.))
+            .rounded(px(6.))
             .bg(bg)
             .text_color(white())
             .text_sm()
@@ -1714,35 +1653,23 @@ impl VoxInk {
     }
 
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let recording = self.state.recording_state == RecordingState::Recording;
-
         v_flex()
             .w_full()
             .gap_2()
             .px_4()
             .pt_4()
             .pb_3()
-            // 单行工具条：模式切换 + 录音按钮 + 状态胶囊 + 实时波形。
+            // 单行工具条：麦克风切换（最左）+ 模式切换 + 录音按钮。
+            // （录音实时波形已移至顶部标题栏的状态胶囊右侧。）
             .child(
                 h_flex()
                     .w_full()
                     .items_center()
                     .gap_3()
+                    .child(self.render_mic_trigger(cx))
                     .child(self.render_mode_toggle(cx))
-                    .child(self.render_record_button(cx))
-                    .child(
-                        // 右侧弹性区：录音时显示实时波形，空闲时留白。
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .overflow_hidden()
-                            .when(recording, |d| d.child(self.render_waveform(cx))),
-                    ),
+                    .child(self.render_record_button(cx)),
             )
-            // 麦克风栏：当前设备 + 下拉切换 + 测试（频繁操作，常驻主界面）。
-            .child(self.render_mic_bar(cx))
             // 下拉展开时的设备列表（内联展开，避免浮层依赖）。
             .when(self.mic_dropdown_open, |this| {
                 this.child(self.render_mic_dropdown(cx))
@@ -1766,7 +1693,7 @@ impl VoxInk {
 
     /// 转录模式切换（离线 ⟷ 实时）。自绘开关：两态各用一种**明亮且对比**的轨道色
     /// （离线=蓝 / 实时=琥珀）区分模式，无启用/禁用语义；当前选中模式的**文字用品牌主色**高亮。
-    /// 前缀「转录模式」点明用途。录音中禁用但仍显示当前模式。
+    /// 去掉前缀文案、改用 hover 提示点明用途。录音中禁用但仍显示当前模式。
     fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
         let disabled = self.state.recording_state != RecordingState::Idle;
@@ -1813,23 +1740,31 @@ impl VoxInk {
         }
 
         h_flex()
+            .id("mode-toggle")
+            .relative()
             .flex_shrink_0()
             .items_center()
             .gap_2()
-            .child(div().text_sm().text_color(muted).child(tr("mode.title")))
+            .on_hover(cx.listener(|this, hovered: &bool, _w, cx| {
+                this.toolbar_tip = hovered.then_some(ToolbarTip::Mode);
+                cx.notify();
+            }))
             .child(side_label(tr("mode.offline"), !is_streaming))
             .child(sw)
             .child(side_label(tr("mode.streaming"), is_streaming))
+            .when(self.toolbar_tip == Some(ToolbarTip::Mode), |this| {
+                this.child(self.toolbar_tooltip(tr("mode.tooltip"), cx))
+            })
     }
 
-    /// 麦克风栏：当前设备（可点开下拉切换）+ 测试按钮 + 测试时的实时电平条。
-    fn render_mic_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 麦克风切换触发器：显示当前设备，点击展开下拉切换；hover 提示用途。录音中禁用。
+    fn render_mic_trigger(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let idle = self.is_idle();
-        let testing = self.mic_testing;
         let label = self.current_mic_label(cx);
 
         let mut trigger = h_flex()
             .id("mic-trigger")
+            .relative()
             .items_center()
             .gap_1p5()
             .h(px(28.))
@@ -1843,18 +1778,25 @@ impl VoxInk {
             })
             .bg(cx.theme().background)
             .text_xs()
+            .on_hover(cx.listener(|this, hovered: &bool, _w, cx| {
+                this.toolbar_tip = hovered.then_some(ToolbarTip::Mic);
+                cx.notify();
+            }))
             .child(
                 Icon::empty()
                     .path("icons/mic.svg")
                     .size(px(12.))
                     .text_color(cx.theme().muted_foreground),
             )
-            .child(div().max_w(px(180.)).truncate().child(label))
+            .child(div().max_w(px(140.)).truncate().child(label))
             .child(
                 Icon::new(IconName::ChevronDown)
                     .size(px(12.))
                     .text_color(cx.theme().muted_foreground),
-            );
+            )
+            .when(self.toolbar_tip == Some(ToolbarTip::Mic), |this| {
+                this.child(self.toolbar_tooltip(tr("mic.tooltip"), cx))
+            });
         if idle {
             trigger = trigger
                 .cursor_pointer()
@@ -1863,47 +1805,39 @@ impl VoxInk {
         } else {
             trigger = trigger.opacity(0.6);
         }
+        trigger
+    }
 
-        // 测试时的实时电平条（与录音波形同风格，置于右侧弹性区）。
-        let mut meter = h_flex().items_center().gap_0p5();
-        if testing {
-            for &l in &self.levels {
-                meter = meter.child(
+    /// 自绘工具条提示气泡：定位在触发元素**正下方、水平居中**（区别于内置 tooltip 锚定在鼠标右下角）。
+    /// 触发元素须为 `relative()`；用 `deferred` 置顶绘制，避免被后续兄弟（编辑区）覆盖。
+    /// 外层 `top_full + 横向铺满 + justify_center` 让气泡以触发元素中心为基准居中。
+    fn toolbar_tooltip(&self, text: impl Into<SharedString>, cx: &Context<Self>) -> AnyElement {
+        deferred(
+            div()
+                .absolute()
+                .top_full()
+                .left_0()
+                .right_0()
+                .mt_1p5()
+                .flex()
+                .justify_center()
+                .child(
                     div()
-                        .w(px(2.))
-                        .h(px(level_bar_height(l)))
-                        .rounded_full()
-                        .bg(STATUS_RECORDING),
-                );
-            }
-        }
-
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .child(trigger)
-            .child(
-                Button::new("mic-test")
-                    .outline()
-                    .small()
-                    .label(if testing {
-                        tr("mic.testing")
-                    } else {
-                        tr("mic.test")
-                    })
-                    .disabled(!idle || testing)
-                    .on_click(cx.listener(Self::on_test_mic)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .h(px(WAVE_MAX_PX))
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(meter),
-            )
+                        .max_w(px(360.))
+                        .bg(cx.theme().popover)
+                        .text_color(cx.theme().popover_foreground)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .shadow_md()
+                        .rounded(px(6.))
+                        .py_0p5()
+                        .px_2()
+                        .text_xs()
+                        .child(text.into()),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     /// 麦克风下拉：「系统默认」+ 各可用设备；当前项高亮。
@@ -1964,31 +1898,17 @@ impl VoxInk {
         item
     }
 
-    /// 状态胶囊：● 状态 + MM:SS。
-    /// 实时电平波形：把近期电平历史画成一排竖条（左旧右新，随声音起伏）。
-    fn render_waveform(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = h_flex()
-            .w_full()
-            .h_full()
-            .items_center()
-            .justify_start()
-            .gap_0p5();
-
-        if self.levels.iter().all(|&l| l < 0.001) {
-            // 尚无明显输入：提示"聆听中"。
-            return row.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr("record.listening")),
-            );
-        }
-
-        for &l in &self.levels {
+    /// 标题栏内的迷你实时波形（录音中显示于状态胶囊右侧）。
+    /// 仅取最近 [`TITLEBAR_WAVE_BARS`] 个样本、按 [`TITLEBAR_WAVE_MAX_PX`] 压低高度以贴合标题栏；
+    /// 无 `window_control_area`、无交互，故不影响窗口拖拽。
+    fn render_titlebar_waveform(&self) -> impl IntoElement {
+        let mut row = h_flex().items_center().gap_0p5();
+        let start = self.levels.len().saturating_sub(TITLEBAR_WAVE_BARS);
+        for &l in &self.levels[start..] {
             row = row.child(
                 div()
                     .w(px(2.))
-                    .h(px(level_bar_height(l)))
+                    .h(px(titlebar_bar_height(l)))
                     .rounded_full()
                     .bg(STATUS_RECORDING),
             );
@@ -2469,14 +2389,14 @@ impl RecordGlyph {
             RecordGlyph::Dot => Some(
                 Icon::empty()
                     .path("icons/mic.svg")
-                    .size(px(15.))
+                    .size(px(13.))
                     .text_color(white())
                     .into_any_element(),
             ),
             // 经典「停止」圆角方块。
             RecordGlyph::Square => Some(
                 div()
-                    .size(px(10.))
+                    .size(px(9.))
                     .rounded(px(2.))
                     .bg(white())
                     .into_any_element(),
@@ -2490,6 +2410,18 @@ impl RecordGlyph {
 const WAVE_MAX_PX: f32 = 34.0;
 /// 波形竖条静音时的最小高度（px）——保留一条细基线，视觉上"在听"。
 const WAVE_MIN_PX: f32 = 2.0;
+
+/// 标题栏迷你波形保留的竖条数（标题栏窄，只显示最近一小段）。
+const TITLEBAR_WAVE_BARS: usize = 28;
+/// 标题栏迷你波形竖条最大高度（px）——压低以贴合 34px 高的标题栏。
+const TITLEBAR_WAVE_MAX_PX: f32 = 16.0;
+
+/// 电平 → 标题栏迷你波形竖条高度（px）：复用 [`level_bar_height`] 的 dBFS 刻度，
+/// 再线性缩放到 [WAVE_MIN_PX, TITLEBAR_WAVE_MAX_PX]。
+fn titlebar_bar_height(level: f32) -> f32 {
+    let norm = (level_bar_height(level) - WAVE_MIN_PX) / (WAVE_MAX_PX - WAVE_MIN_PX);
+    WAVE_MIN_PX + norm * (TITLEBAR_WAVE_MAX_PX - WAVE_MIN_PX)
+}
 
 /// 电平（0..1 幅度包络）→ 波形竖条高度（px）。
 ///

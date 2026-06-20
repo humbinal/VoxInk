@@ -10,39 +10,18 @@ record.stop:
 record.processing:
   zh-CN: 处理中…
   en: Processing…
-record.listening:
-  zh-CN: 聆听中…
-  en: Listening…
 mic.default:
   zh-CN: 系统默认麦克风
   en: System default mic
-mic.test:
-  zh-CN: 测试
-  en: Test
-mic.testing:
-  zh-CN: 测试中…
-  en: Testing…
-mic.test_ok:
-  zh-CN: 麦克风工作正常 ✓
-  en: Microphone is working ✓
-mic.test_no_signal:
-  zh-CN: 未检测到声音，请确认麦克风已开启且未静音
-  en: No sound detected — check the mic is on and unmuted
-mic.test_failed:
-  zh-CN: 无法打开该麦克风
-  en: Could not open this microphone
-mic.test_no_device:
-  zh-CN: 未检测到麦克风设备
-  en: No microphone device found
 mic.no_devices:
   zh-CN: 未发现可用麦克风
   en: No microphones found
-mic.busy:
-  zh-CN: 录制中，暂不能测试麦克风
-  en: Recording — cannot test the mic now
-mode.title:
-  zh-CN: 转录模式
-  en: Mode
+mic.tooltip:
+  zh-CN: 选择录音使用的麦克风设备
+  en: Choose the microphone used for recording
+mode.tooltip:
+  zh-CN: 切换转录模式：离线（录完整段后识别）/ 实时（边说边出字）
+  en: Switch mode — Offline (transcribe after recording) / Realtime (live as you speak)
 mode.streaming:
   zh-CN: 实时
   en: Realtime

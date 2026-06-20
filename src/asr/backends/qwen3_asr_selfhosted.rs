@@ -2,7 +2,9 @@
 //!
 //! 对接 Quantatirsk/qwen3-asr 单一部署服务，**同时支持实时与离线**（离线含大文件，
 //! 服务端按 VAD 自动切分，无需 OSS 中转）。用户在配置里填**基址**（如 `http://host:17003`），
-//! 本后端从基址派生 HTTP 与 WebSocket 两个端点。鉴权为**可选** Bearer（留空即匿名）。
+//! 本后端从基址派生 HTTP 与 WebSocket 两个端点。鉴权**可选**（留空即匿名）：
+//! HTTP 走 `Authorization: Bearer <key>`，WS 走 `X-NLS-Token: <key>` 头
+//! （服务端 WS 不读 Bearer，见 `core/security.py::extract_websocket_token`）。
 //!
 //! - 离线：`POST {base}/v1/audio/transcriptions`，multipart `file` + `response_format=text`，
 //!   服务端直接返回纯文本。最大约 2GB（受服务端 `MAX_AUDIO_SIZE` 限制）。

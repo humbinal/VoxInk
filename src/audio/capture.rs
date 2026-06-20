@@ -177,58 +177,6 @@ impl Drop for Recorder {
     }
 }
 
-/// 麦克风可用性探测：打开设备后仅把实时电平写入 `LevelMeter`（不重采样、不写 WAV），
-/// 供「测试麦克风」时的实时电平显示。`stop()` 或 drop 即结束。
-pub struct MicProbe {
-    stream: cpal::Stream,
-    stop_flag: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl MicProbe {
-    /// 打开 `device`（None/空 = 系统默认）并开始把电平写入 `level`。失败返回 [`AudioError`]。
-    pub fn start(device: Option<String>, level: LevelMeter) -> Result<Self, AudioError> {
-        let cap = open_capture(device.as_deref())?;
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let mut cons = cap.cons;
-        let stop = stop_flag.clone();
-        let worker = std::thread::spawn(move || {
-            let mut chunk = vec![0f32; 4096];
-            let mut env = super::LevelEnvelope::new();
-            loop {
-                let n = cons.pop_slice(&mut chunk);
-                if n > 0 {
-                    super::store_level(&level, env.push(&chunk[..n]));
-                } else if stop.load(Ordering::SeqCst) {
-                    break;
-                } else {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            }
-        });
-        Ok(Self {
-            stream: cap.stream,
-            stop_flag,
-            worker: Some(worker),
-        })
-    }
-
-    /// 停止探测（暂停采集流并结束 worker）。
-    pub fn stop(mut self) {
-        let _ = self.stream.pause();
-        self.stop_flag.store(true, Ordering::SeqCst);
-        if let Some(h) = self.worker.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for MicProbe {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
-    }
-}
-
 /// 按设备采样格式分派到泛型构建函数。
 fn build_stream(
     device: &cpal::Device,

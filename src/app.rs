@@ -144,6 +144,8 @@ pub struct VoxInk {
     retranscribing: std::collections::HashSet<String>,
     /// 左栏记录列表滚动句柄（驱动可见滚动条）。
     record_scroll: ScrollHandle,
+    /// 右侧录音片段列表滚动句柄（驱动可见滚动条）。
+    segment_scroll: ScrollHandle,
     /// 当前应用内回放会话（None 表示未在播放）。
     playback: Option<Playback>,
     /// 回放轮询代际（仅最新一次轮询循环生效，避免重复播放叠加多个循环）。
@@ -289,6 +291,7 @@ impl VoxInk {
             show_segments: false,
             retranscribing: std::collections::HashSet::new(),
             record_scroll: ScrollHandle::new(),
+            segment_scroll: ScrollHandle::new(),
             playback: None,
             playback_gen: 0,
             autosave_gen: 0,
@@ -2137,12 +2140,13 @@ impl VoxInk {
     fn render_segments(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = v_flex()
             .w_full()
-            .max_h(px(200.))
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
             .child(
                 h_flex()
+                    // 标题不可压缩，始终占满一行高度。
+                    .flex_shrink_0()
                     .w_full()
                     .items_center()
                     .px_4()
@@ -2171,14 +2175,34 @@ impl VoxInk {
         let mut list = v_flex()
             .id("segment-list")
             .w_full()
+            // 列表自身限高：内容不足时按内容高、超出则在此高度内滚动（面板内容驱动，
+            // 不能靠 flex_1——面板非定高父级，flex_1 会塌成 0）。
+            .max_h(px(168.))
             .gap_0p5()
             .px_2()
             .pb_2()
-            .overflow_y_scroll();
+            // 原生溢出滚动 + 绑定句柄；可见滚动条由下方 Scrollbar 叠层绘制。
+            .overflow_y_scroll()
+            .track_scroll(&self.segment_scroll);
         for seg in &self.segments {
             list = list.child(self.render_segment_row(seg, cx));
         }
-        panel.child(list)
+
+        // relative 容器承载滚动列表 + 绝对定位可见滚动条（仅内容超高滚动时出现）。
+        panel.child(
+            div()
+                .relative()
+                .flex_shrink_0()
+                .w_full()
+                .child(list)
+                .child(
+                    div().absolute().inset_0().child(
+                        Scrollbar::vertical(&self.segment_scroll)
+                            .id("segment-scrollbar")
+                            .scrollbar_show(ScrollbarShow::Scrolling),
+                    ),
+                ),
+        )
     }
 
     fn render_segment_row(&self, seg: &Segment, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2211,6 +2235,8 @@ impl VoxInk {
 
         h_flex()
             .id(elem_id("seg", &seg.id))
+            // 不可压缩：列表过长时溢出滚动，而非压扁条目导致内容重叠遮挡。
+            .flex_shrink_0()
             // relative + overflow_hidden：让背景进度条限定在圆角矩形内。
             .relative()
             .overflow_hidden()

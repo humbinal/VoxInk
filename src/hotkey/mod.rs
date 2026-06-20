@@ -130,7 +130,7 @@ fn dispatch(action: HotkeyAction, view: &Entity<VoxInk>, win: &mut gpui::Window,
             view.update(app, |view, vcx| view.toggle_recording(win, vcx));
         }
         HotkeyAction::ToggleWindow => {
-            crate::tray::toggle_window_visibility(win);
+            view.update(app, |view, vcx| view.toggle_main_window(win, vcx));
         }
         HotkeyAction::CopyAndPaste => {
             view.update(app, |view, vcx| view.copy_and_paste(win, vcx));

@@ -76,7 +76,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                 .timer(Duration::from_millis(150))
                 .await;
 
-            // 左键单击：切换窗口显隐。
+            // 左键单击：切换主窗口显隐（显示则隐藏迷你条，互斥）。经 view 统一协调。
             while let Ok(event) = TrayIconEvent::receiver().try_recv() {
                 if let TrayIconEvent::Click {
                     button: MouseButton::Left,
@@ -84,10 +84,9 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                     ..
                 } = event
                 {
-                    let _ = window.update(cx, |_, win, _| {
-                        if let Some(h) = window_hwnd(win) {
-                            toggle_window(h);
-                        }
+                    let any_window = *window;
+                    let _ = any_window.update(cx, |_, win, app| {
+                        view.update(app, |view, vcx| view.toggle_main_window(win, vcx));
                     });
                 }
             }
@@ -98,10 +97,9 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                     cx.update(|cx| cx.quit());
                     return;
                 } else if event.id == "open" {
-                    let _ = window.update(cx, |_, win, _| {
-                        if let Some(h) = window_hwnd(win) {
-                            show_window(h);
-                        }
+                    let any_window = *window;
+                    let _ = any_window.update(cx, |_, win, app| {
+                        view.update(app, |view, vcx| view.show_main_window(win, vcx));
                     });
                 } else if event.id == "record" {
                     // 经 AnyWindowHandle::update 取 Window 而**不租借 Root 视图**：
@@ -124,15 +122,12 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                         });
                     });
                 } else if event.id == "settings" {
-                    // 设置是主窗口上的覆盖层：先把主窗口显示/置前，再打开覆盖层。
-                    // 用 AnyWindowHandle（`*window`）取 Window 而不租借 Root，避免与
-                    // 视图更新/通知产生双重租借（同 record 分支）。
+                    // 设置是主窗口上的覆盖层：先显示主窗口（并隐藏迷你条），再打开覆盖层。
+                    // 用 AnyWindowHandle（`*window`）取 Window 而不租借 Root，避免双重租借。
                     let any_window = *window;
                     let _ = any_window.update(cx, |_, win, app| {
-                        if let Some(h) = window_hwnd(win) {
-                            show_window(h);
-                        }
                         view.update(app, |view, vcx| {
+                            view.show_main_window(win, vcx);
                             view.open_settings(win, vcx);
                         });
                     });
@@ -152,10 +147,23 @@ pub fn hide_to_tray(window: &Window) {
     }
 }
 
-/// 切换主窗口显隐（供全局快捷键"唤起/隐藏窗口"调用，M9）。
-pub fn toggle_window_visibility(window: &Window) {
+/// 显示主窗口并置前（供 view 协调"显示主窗口"调用）。
+pub fn show_to_front(window: &Window) {
     if let Some(h) = window_hwnd(window) {
-        toggle_window(h);
+        show_window(h);
+    }
+}
+
+/// 主窗口当前是否可见（供 view 切换显隐时判断）。
+pub fn is_window_visible(window: &Window) -> bool {
+    #[cfg(windows)]
+    {
+        window_hwnd(window).is_some_and(winimpl::is_visible)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        false
     }
 }
 
@@ -212,21 +220,6 @@ fn show_window(h: isize) {
 fn hide_window(h: isize) {
     #[cfg(windows)]
     winimpl::hide(h);
-    #[cfg(not(windows))]
-    {
-        let _ = h;
-    }
-}
-
-fn toggle_window(h: isize) {
-    #[cfg(windows)]
-    {
-        if winimpl::is_visible(h) {
-            winimpl::hide(h);
-        } else {
-            winimpl::show(h);
-        }
-    }
     #[cfg(not(windows))]
     {
         let _ = h;

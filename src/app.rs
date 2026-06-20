@@ -148,6 +148,8 @@ pub struct VoxInk {
     segment_scroll: ScrollHandle,
     /// 迷你状态条窗口句柄（None 表示尚未创建；创建后靠显隐切换，不销毁）。
     mini_window: Option<WindowHandle<Root>>,
+    /// 迷你条当前是否可见（与主窗口互斥：见 [`Self::toggle_mini_bar`]）。
+    mini_visible: bool,
     /// 当前应用内回放会话（None 表示未在播放）。
     playback: Option<Playback>,
     /// 回放轮询代际（仅最新一次轮询循环生效，避免重复播放叠加多个循环）。
@@ -295,6 +297,7 @@ impl VoxInk {
             record_scroll: ScrollHandle::new(),
             segment_scroll: ScrollHandle::new(),
             mini_window: None,
+            mini_visible: false,
             playback: None,
             playback_gen: 0,
             autosave_gen: 0,
@@ -1233,25 +1236,37 @@ impl VoxInk {
         }
     }
 
-    /// 迷你状态条取用的状态快照：`(录制状态, 时长秒, 正文字数)`。
-    pub fn mini_snapshot(&self, cx: &App) -> (RecordingState, u32, usize) {
+    /// 迷你状态条取用的状态快照（录制状态/模式/时长/字数/近期电平）。
+    pub fn mini_snapshot(&self, cx: &App) -> crate::mini::MiniSnapshot {
         let chars = self.editor.read(cx).value().chars().count();
-        (
-            self.state.recording_state,
-            self.state.recording_duration_secs,
+        let start = self.levels.len().saturating_sub(crate::mini::MINI_WAVE_BARS);
+        crate::mini::MiniSnapshot {
+            state: self.state.recording_state,
+            mode: self.state.transcription_mode,
+            duration_secs: self.state.recording_duration_secs,
             chars,
-        )
+            levels: self.levels[start..].to_vec(),
+        }
     }
 
-    /// 切换迷你状态条窗口的显隐（供托盘菜单与全局快捷键调用）。
-    /// 首次调用创建窗口（置顶、底部居中），之后仅显隐切换、不销毁。
+    /// 切换迷你条显隐（托盘菜单 / 全局快捷键）：与主窗口互斥——
+    /// 显示迷你条时隐藏主窗口；隐藏迷你条仅收起本身（主窗口保持隐藏，回托盘）。
     pub fn toggle_mini_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 全程用 App 级 defer（不借用本视图）：迷你窗创建时其首帧会 read 主视图，
-        // 若在主视图 update 内创建会触发"read while being updated"panic；defer 推迟到
-        // 当前 update 之外，亦避免嵌套窗口更新。
+        if self.mini_visible {
+            self.set_mini_visible(false, cx);
+        } else {
+            crate::tray::hide_to_tray(window); // 主窗口与迷你条互斥
+            self.show_mini(window, cx);
+        }
+    }
+
+    /// 显示（或首次创建）迷你条并置顶。窗口操作全程经 App 级 defer：迷你窗显示时其
+    /// 首帧会 read 主视图，若在主视图 update 内进行会触发"read while being updated"panic。
+    fn show_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mini_visible = true;
         if let Some(handle) = self.mini_window {
             cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, win, _| crate::mini::toggle_visibility(win));
+                let _ = handle.update(cx, |_, win, _| crate::mini::show_topmost(win));
             });
             return;
         }
@@ -1264,12 +1279,48 @@ impl VoxInk {
             });
             match handle {
                 Ok(handle) => {
-                    let _ = handle.update(cx, |_, win, _| crate::mini::place_topmost(win));
+                    let _ = handle.update(cx, |_, win, _| crate::mini::show_topmost(win));
                     view.update(cx, |this, _| this.mini_window = Some(handle));
                 }
                 Err(e) => tracing::error!("打开迷你条窗口失败: {e:#}"),
             }
         });
+    }
+
+    /// 设置迷你条可见性（纯显隐，不创建）。
+    fn set_mini_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.mini_visible = visible;
+        if let Some(handle) = self.mini_window {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, win, _| {
+                    if visible {
+                        crate::mini::show_topmost(win);
+                    } else {
+                        crate::mini::hide(win);
+                    }
+                });
+            });
+        }
+    }
+
+    /// 隐藏迷你条（收回托盘）。供迷你条上的"隐藏"按钮调用。
+    pub fn hide_mini_bar(&mut self, cx: &mut Context<Self>) {
+        self.set_mini_visible(false, cx);
+    }
+
+    /// 显示主窗口并置前，同时隐藏迷你条（互斥）。供托盘/快捷键/迷你条"主窗口"按钮调用。
+    pub fn show_main_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::tray::show_to_front(window);
+        self.set_mini_visible(false, cx);
+    }
+
+    /// 切换主窗口显隐：显示则同时隐藏迷你条；隐藏则收回托盘（迷你条保持隐藏）。
+    pub fn toggle_main_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::tray::is_window_visible(window) {
+            crate::tray::hide_to_tray(window);
+        } else {
+            self.show_main_window(window, cx);
+        }
     }
 
     /// 一键复制并粘贴：复制全部文本到剪贴板 + 模拟粘贴到前台应用（M9 任务 9.4）。
@@ -1506,6 +1557,22 @@ impl VoxInk {
                     .hover(|s| s.bg(cx.theme().muted).text_color(cx.theme().foreground))
                     .on_click(cx.listener(Self::on_open_settings))
                     .child(Icon::new(IconName::Settings).size(px(15.))),
+            )
+            // 切换到迷你条模式（设置齿轮右侧）：与迷你条「打开主窗口」按钮成镜像
+            //（此处 Minimize 收缩为迷你条，迷你条用 Maximize 展开回主窗）。
+            .child(
+                div()
+                    .id("to-mini")
+                    .w(px(44.))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().muted).text_color(cx.theme().foreground))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_mini_bar(window, cx)))
+                    .child(Icon::new(IconName::Minimize).size(px(15.))),
             )
             // 自绘窗口控制按钮（标记 NC 区域，点击由系统处理 最小化/最大化/关闭）。
             .child(self.render_window_button(

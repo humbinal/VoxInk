@@ -15,10 +15,11 @@ use chrono::{DateTime, Local};
 use gpui::{
     deferred, div, ease_in_out, prelude::*, px, white, Animation, AnimationExt, AnyElement,
     App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
-    ParentElement, Render, SharedString, Styled, Subscription, Window, WindowControlArea,
+    ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
+    WindowControlArea,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, v_flex, ActiveTheme,
+    button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, scroll::{Scrollbar, ScrollbarShow}, v_flex, ActiveTheme,
     Disableable,
     Icon,
     IconName,
@@ -141,6 +142,8 @@ pub struct VoxInk {
     show_segments: bool,
     /// 正在重新转写中的片段 id 集合（用于按钮转圈 + 禁用播放/删除）。
     retranscribing: std::collections::HashSet<String>,
+    /// 左栏记录列表滚动句柄（驱动可见滚动条）。
+    record_scroll: ScrollHandle,
     /// 设置面板覆盖层视图（M11）。
     settings: Entity<SettingsView>,
     /// 是否显示设置面板覆盖层。
@@ -273,6 +276,7 @@ impl VoxInk {
             segments,
             show_segments: false,
             retranscribing: std::collections::HashSet::new(),
+            record_scroll: ScrollHandle::new(),
             autosave_gen: 0,
             settings,
             show_settings: false,
@@ -1478,15 +1482,16 @@ impl VoxInk {
     fn render_record_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = v_flex()
             .id("record-list")
-            .flex_1()
-            .w_full()
+            .size_full()
             .gap_1()
             .px_2()
             .pb_2()
-            .overflow_y_scroll();
+            // 原生溢出滚动 + 绑定滚动句柄；可见滚动条由下方 Scrollbar 叠层绘制。
+            .overflow_y_scroll()
+            .track_scroll(&self.record_scroll);
 
         if self.records.is_empty() {
-            return list.child(
+            list = list.child(
                 div()
                     .px_2()
                     .py_3()
@@ -1494,28 +1499,43 @@ impl VoxInk {
                     .text_color(cx.theme().muted_foreground)
                     .child(tr("sidebar.empty")),
             );
+        } else {
+            let current = self.current_record_id.clone();
+            let is_idle = self.is_idle();
+            let mut last_bucket = "";
+            for rec in &self.records {
+                let bucket = record_bucket(&rec.created_at);
+                if bucket != last_bucket {
+                    last_bucket = bucket;
+                    list = list.child(
+                        div()
+                            .flex_shrink_0()
+                            .px_2()
+                            .pt_2()
+                            .pb_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr(bucket)),
+                    );
+                }
+                list = list.child(self.render_record_item(rec, &current, is_idle, cx));
+            }
         }
 
-        let current = self.current_record_id.clone();
-        let is_idle = self.is_idle();
-        let mut last_bucket = "";
-        for rec in &self.records {
-            let bucket = record_bucket(&rec.created_at);
-            if bucket != last_bucket {
-                last_bucket = bucket;
-                list = list.child(
-                    div()
-                        .px_2()
-                        .pt_2()
-                        .pb_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr(bucket)),
-                );
-            }
-            list = list.child(self.render_record_item(rec, &current, is_idle, cx));
-        }
-        list
+        // flex_1 容器承载滚动列表 + 绝对定位的可见滚动条（仅内容超高时显示）。
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(list)
+            .child(
+                div().absolute().inset_0().child(
+                    Scrollbar::vertical(&self.record_scroll)
+                        .id("record-scrollbar")
+                        .scrollbar_show(ScrollbarShow::Scrolling),
+                ),
+            )
     }
 
     fn render_record_item(
@@ -1563,6 +1583,8 @@ impl VoxInk {
 
         let mut row = h_flex()
             .id(elem_id("rec", &rec.id))
+            // 不可压缩：窗口变矮时让列表溢出滚动，而非压扁条目导致内容重叠遮挡。
+            .flex_shrink_0()
             .w_full()
             .items_center()
             .gap_1()

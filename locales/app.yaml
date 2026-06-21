@@ -48,6 +48,9 @@ sidebar.search:
 sidebar.empty:
   zh-CN: 暂无记录
   en: No records
+sidebar.delete:
+  zh-CN: 删除记录
+  en: Delete record
 group.today:
   zh-CN: 今天
   en: Today

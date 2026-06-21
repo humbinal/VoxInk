@@ -25,6 +25,7 @@ use gpui_component::{
     IconName,
     Root,
     Sizable,
+    tooltip::Tooltip,
     WindowExt,
 };
 
@@ -1795,7 +1796,7 @@ impl VoxInk {
                     .text_color(cx.theme().muted_foreground)
                     .hover(|s| s.bg(cx.theme().muted).text_color(cx.theme().foreground))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_mini_bar(window, cx)))
-                    .child(Icon::new(IconName::Minimize).size(px(15.))),
+                    .child(Icon::new(IconName::Minimize).size(px(13.))),
             )
             // 自绘窗口控制按钮（标记 NC 区域，点击由系统处理 最小化/最大化/关闭）。
             .child(self.render_window_button(
@@ -1933,7 +1934,6 @@ impl VoxInk {
         let mut list = v_flex()
             .id("record-list")
             .size_full()
-            .gap_1()
             .px_2()
             .pb_2()
             // 原生溢出滚动 + 绑定滚动句柄；可见滚动条由下方 Scrollbar 叠层绘制。
@@ -2011,14 +2011,14 @@ impl VoxInk {
             .child(
                 v_flex()
                     .w_full()
-                    .gap_0p5()
                     // 标题单行截断（省略号），避免长文本换行撑高列表项。
-                    .child(div().w_full().text_sm().truncate().child(title))
+                    .child(div().w_full().text_size(px(13.)).truncate().child(title))
                     .child(
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .text_xs()
+                            // 第 2 行（日期等）比正文更小、更贴近标题，整体更紧凑。
+                            .text_size(px(10.))
                             .text_color(cx.theme().muted_foreground)
                             .child(time_label(&rec.created_at)),
                     ),
@@ -2033,14 +2033,19 @@ impl VoxInk {
 
         let mut row = h_flex()
             .id(elem_id("rec", &rec.id))
+            // 分组：删除按钮默认隐藏，悬停本行时才显示（见下方 group_hover）。
+            // 各行共用同一组名也不会互相触发——组命中框按名入栈，绘制本行时栈顶即本行。
+            .group("recrow")
             // 不可压缩：窗口变矮时让列表溢出滚动，而非压扁条目导致内容重叠遮挡。
             .flex_shrink_0()
             .w_full()
             .items_center()
             .gap_1()
             .px_2()
-            .py_1p5()
-            .rounded(px(6.))
+            .py_1()
+            // 行间细分隔线：静态时即可分辨各行，避免列表糊成一片。
+            .border_b_1()
+            .border_color(cx.theme().border.opacity(0.5))
             .overflow_hidden()
             .child(body);
 
@@ -2060,9 +2065,13 @@ impl VoxInk {
                     .size(px(22.))
                     .rounded(px(5.))
                     .cursor_pointer()
+                    // 默认隐藏（保留占位，避免悬停时文字抖动），悬停本行时显示。
+                    .invisible()
+                    .group_hover("recrow", |s| s.visible())
                     .text_color(cx.theme().muted_foreground)
                     .hover(|s| s.text_color(DANGER))
-                    .child(Icon::new(IconName::Close).size(px(13.)))
+                    .tooltip(|window, cx| Tooltip::new(tr("sidebar.delete")).build(window, cx))
+                    .child(Icon::new(IconName::Delete).size(px(13.)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.delete_record(del_id.clone(), window, cx)
                     })),
@@ -2463,6 +2472,7 @@ impl VoxInk {
             .child(
                 Button::new("copy")
                     .primary()
+                    .small()
                     .when(copied, |b| b.success())
                     .icon(if copied {
                         IconName::Check
@@ -2575,6 +2585,7 @@ impl VoxInk {
                             .child(
                                 Button::new("polish-close")
                                     .ghost()
+                                    .small()
                                     .icon(IconName::Close)
                                     .on_click(cx.listener(|this, _, _w, cx| this.close_polish(cx))),
                             ),
@@ -2594,6 +2605,7 @@ impl VoxInk {
                             .child(
                                 Button::new("polish-run")
                                     .primary()
+                                    .small()
                                     .icon(IconName::Bot)
                                     .label(tr("polish.run"))
                                     .loading(self.polish_loading)
@@ -2678,12 +2690,14 @@ impl VoxInk {
                             .child(
                                 Button::new("polish-cancel")
                                     .ghost()
+                                    .small()
                                     .label(tr("polish.discard"))
                                     .on_click(cx.listener(|this, _, _w, cx| this.close_polish(cx))),
                             )
                             .child(
                                 Button::new("polish-copy")
                                     .outline()
+                                    .small()
                                     .icon(IconName::Copy)
                                     .label(tr("polish.copy"))
                                     .disabled(!has_result)
@@ -2694,6 +2708,7 @@ impl VoxInk {
                             .child(
                                 Button::new("polish-save-new")
                                     .outline()
+                                    .small()
                                     .label(tr("polish.save_as_new"))
                                     .disabled(!has_result)
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -2703,6 +2718,7 @@ impl VoxInk {
                             .child(
                                 Button::new("polish-apply")
                                     .primary()
+                                    .small()
                                     .icon(IconName::Check)
                                     .label(tr("polish.apply"))
                                     .disabled(!has_result)
@@ -2756,7 +2772,6 @@ impl VoxInk {
             // 列表自身限高：内容不足时按内容高、超出则在此高度内滚动（面板内容驱动，
             // 不能靠 flex_1——面板非定高父级，flex_1 会塌成 0）。
             .max_h(px(168.))
-            .gap_0p5()
             .px_2()
             .pb_2()
             // 原生溢出滚动 + 绑定句柄；可见滚动条由下方 Scrollbar 叠层绘制。
@@ -2822,8 +2837,10 @@ impl VoxInk {
             .items_center()
             .gap_2()
             .px_2()
-            .py_1p5()
-            .rounded(px(6.))
+            .py_1()
+            // 行间细分隔线：与左侧记录列表一致，静态即可分辨各行。
+            .border_b_1()
+            .border_color(cx.theme().border.opacity(0.5))
             .hover(|s| s.bg(cx.theme().list_hover))
             // 背景进度条：品牌浅色填充，宽度随播放进度从左扫到右（首个子节点 → 绘于内容之下）。
             .when(progress > 0.0, |row| {
@@ -2842,25 +2859,19 @@ impl VoxInk {
                     .flex_shrink_0()
                     .size(px(6.))
                     .rounded_full()
-                    .bg(mode_dot(&seg.mode, cx)),
+                    .bg(mode_dot(&seg.mode)),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .w_full()
-                            .text_sm()
-                            .truncate()
-                            .mb(px(2.))
-                            .child(snippet),
-                    )
+                    .child(div().w_full().text_size(px(13.)).truncate().child(snippet))
                     .child(
                         h_flex()
                             .gap_2()
-                            .text_xs()
+                            // 第 2 行（日期/时长/大小）更小、更贴近正文，与左侧记录列表一致。
+                            .text_size(px(10.))
                             .text_color(cx.theme().muted_foreground)
                             .child(time_label(&seg.created_at))
                             .child(fmt_duration(seg.duration_secs))
@@ -2907,7 +2918,7 @@ impl VoxInk {
                         Button::new(elem_id("seg-del", &seg.id))
                             .ghost()
                             .small()
-                            .icon(IconName::Close)
+                            .icon(IconName::Delete)
                             .tooltip(tr("segments.delete"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -3256,10 +3267,10 @@ fn fmt_size(bytes: u64) -> String {
 }
 
 /// 模式指示点颜色：实时=主色，离线/其它=中性。
-fn mode_dot(mode: &str, cx: &App) -> Hsla {
+fn mode_dot(mode: &str) -> Hsla {
     match mode {
-        "streaming" => BRAND,
-        _ => cx.theme().muted_foreground,
+        "streaming" => MODE_STREAMING,
+        _ => MODE_OFFLINE,
     }
 }
 

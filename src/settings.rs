@@ -25,11 +25,18 @@ use crate::asr::{AsrError, BackendRegistry};
 use crate::config::{ShortcutsConfig, VoxInkConfig};
 use crate::i18n::tr;
 use crate::state::TranscriptionMode;
-use crate::theme::{BRAND, DANGER};
+use crate::theme::{BRAND, DANGER, MODE_OFFLINE, MODE_STREAMING};
 
 const FILETRANS_ID: &str = "aliyun_bailian_filetrans";
 /// 设置面板宽度（px）。固定居中覆盖层，与主窗口尺寸无关；上限取主窗口最小宽度（640）以免溢出。
-const PANEL_WIDTH: f32 = 640.0;
+/// 设置面板宽度上限（窗口足够宽时不再继续变宽）。
+const PANEL_MAX_WIDTH: f32 = 820.0;
+/// 设置面板宽度下限（窗口缩到最小 640 时仍留出左右边距）。
+const PANEL_MIN_WIDTH: f32 = 560.0;
+/// 设置面板高度上限（窗口足够高时不再继续变高）。
+const PANEL_MAX_HEIGHT: f32 = 560.0;
+/// 设置面板高度下限（保证标题栏 + 一段可滚动正文 + 保存按钮始终放得下）。
+const PANEL_MIN_HEIGHT: f32 = 320.0;
 /// 「标签在左、控件在右」字段行中右侧控件列的固定宽度（px）。
 const FIELD_CONTROL_WIDTH: f32 = 300.0;
 
@@ -802,7 +809,7 @@ impl SettingsView {
     }
 
     /// 录音片段圆点图例：解释片段列表中每段前圆点颜色对应的转写模式。
-    /// 与 `app::mode_dot` 保持一致——实时=主色，离线=中性灰。
+    /// 与 `app::mode_dot`、主界面模式切换开关保持一致——实时=MODE_STREAMING，离线=MODE_OFFLINE。
     fn segment_legend(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let item = |color, label_key| {
@@ -822,8 +829,8 @@ impl SettingsView {
             .child(
                 h_flex()
                     .gap_4()
-                    .child(item(BRAND, "mode.streaming"))
-                    .child(item(muted, "mode.offline")),
+                    .child(item(MODE_STREAMING, "mode.streaming"))
+                    .child(item(MODE_OFFLINE, "mode.offline")),
             )
     }
 
@@ -1146,7 +1153,7 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let cfg = cx
             .try_global::<GlobalConfig>()
             .map(|g| g.0.clone())
@@ -1467,6 +1474,14 @@ impl Render for SettingsView {
                     )
             });
 
+        // 面板尺寸跟随主窗：窗口越大面板越大，留出边距并设上下限。
+        // 宽度保证缩到最小（640）时不溢出、放大时也不至于过宽；
+        // 高度保证缩矮时不被遮挡——面板随之变矮，由正文区内部滚动条承接溢出，
+        // 顶部标题栏与底部保存按钮（flex_shrink_0）始终可见。
+        let viewport = window.viewport_size();
+        let panel_w = (f32::from(viewport.width) - 80.0).clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
+        let panel_h = (f32::from(viewport.height) - 60.0).clamp(PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
+
         // 覆盖层：半透明遮罩 + 居中面板。`.occlude()` 拦截鼠标，防止穿透到主视图误触录音。
         div()
             .absolute()
@@ -1478,8 +1493,8 @@ impl Render for SettingsView {
             .bg(rgba(0x00000099))
             .child(
                 v_flex()
-                    .w(px(PANEL_WIDTH))
-                    .h(px(560.))
+                    .w(px(panel_w))
+                    .h(px(panel_h))
                     .bg(cx.theme().background)
                     .border_1()
                     .border_color(cx.theme().border)
@@ -1489,22 +1504,24 @@ impl Render for SettingsView {
                     .overflow_hidden()
                     .child(
                         h_flex()
+                            .flex_shrink_0()
                             .justify_between()
                             .items_center()
                             .w_full()
                             .px_4()
-                            .py_3()
+                            .py_2()
                             .border_b_1()
                             .border_color(cx.theme().border)
                             .child(
                                 div()
-                                    .text_base()
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(tr("settings.title")),
                             )
                             .child(
                                 Button::new("settings-close")
                                     .ghost()
+                                    .small()
                                     .icon(IconName::Close)
                                     .on_click(cx.listener(Self::on_close)),
                             ),

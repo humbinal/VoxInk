@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    deferred, div, ease_in_out, prelude::*, px, relative, white, Animation, AnimationExt, AnyElement,
+    deferred, div, ease_in_out, img, prelude::*, px, relative, white, Animation, AnimationExt, AnyElement,
     App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
     WindowControlArea, WindowHandle,
@@ -1255,6 +1255,11 @@ impl VoxInk {
         }
     }
 
+    /// 当前图标状态（录制状态 + 转录模式 → 托盘/任务栏徽标）。
+    pub fn current_icon_status(&self) -> crate::branding::IconStatus {
+        crate::branding::icon_status(self.state.recording_state, self.state.transcription_mode)
+    }
+
     /// 迷你状态条取用的状态快照（录制状态/模式/时长/字数/近期电平）。
     pub fn mini_snapshot(&self, cx: &App) -> crate::mini::MiniSnapshot {
         let chars = self.editor.read(cx).value().chars().count();
@@ -1713,21 +1718,8 @@ impl VoxInk {
                     .pl_3()
                     .overflow_hidden()
                     .window_control_area(WindowControlArea::Drag)
-                    .child(
-                        div()
-                            .size(px(22.))
-                            .rounded_full()
-                            .bg(BRAND)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::empty()
-                                    .path("icons/mic.svg")
-                                    .size(px(13.))
-                                    .text_color(white()),
-                            ),
-                    )
+                    // 品牌 logo（与 exe/托盘/任务栏图标同源，build.rs 程序化渲染的 PNG）。
+                    .child(img("icons/logo.png").size(px(18.)))
                     .child(
                         div()
                             .text_sm()

@@ -72,6 +72,9 @@ ringbuf = "0.4"
 # WAV 由 hound 解码后以 SamplesBuffer 喂入，仅用其播放/暂停/进度能力。
 rodio = { version = "0.20", default-features = false }
 
+# 品牌图标程序化绘制（纯 Rust 抗锯齿矢量光栅；无 C 依赖）。
+tiny-skia = "0.11"
+
 # 系统集成（§1.4，M5）
 tray-icon = "0.21"
 auto-launch = "0.5"
@@ -91,9 +94,17 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
+    # 任务栏状态角标（ITaskbarList3）+ 由 RGBA 造 HICON（GDI）。
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Win32_Graphics_Gdi",
 ] }
 # 从 gpui Window 取 HWND。
 raw-window-handle = "0.6"
 
 [build-dependencies]
 winresource = "0.1"
+# 编译期程序化生成多尺寸 .ico + 主界面 logo.png（纯 Rust）。
+tiny-skia = "0.11"
+ico = "0.4"
+png = "0.17"

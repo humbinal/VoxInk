@@ -9,8 +9,10 @@ use std::borrow::Cow;
 use gpui::{AssetSource, Result, SharedString};
 use gpui_component_assets::Assets as ComponentAssets;
 
-/// VoxInk 自有麦克风图标（品牌徽标用）。
+/// VoxInk 自有麦克风图标（录音按钮 / 迷你条指示用）。
 const MIC_SVG: &[u8] = include_bytes!("../assets/icons/mic.svg");
+/// 主界面标题栏品牌 logo（编译期由 build.rs 程序化渲染，与 exe/托盘/任务栏图标同源）。
+const LOGO_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/voxink_logo.png"));
 
 /// 组合资源源：项目图标优先，其余回退 gpui-component 内置资源。
 pub struct VoxInkAssets;
@@ -19,6 +21,7 @@ impl AssetSource for VoxInkAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         match path {
             "icons/mic.svg" => Ok(Some(Cow::Borrowed(MIC_SVG))),
+            "icons/logo.png" => Ok(Some(Cow::Borrowed(LOGO_PNG))),
             _ => ComponentAssets.load(path),
         }
     }

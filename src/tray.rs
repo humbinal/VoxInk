@@ -50,7 +50,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
         .with_tooltip("VoxInk")
         // 左键不弹菜单——留给"切换窗口显隐"。
         .with_menu_on_left_click(false);
-    if let Some(icon) = tray_icon_image() {
+    if let Some(icon) = crate::branding::tray_icon(crate::branding::IconStatus::Idle) {
         builder = builder.with_icon(icon);
     }
     let tray = builder
@@ -66,15 +66,29 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
         });
     });
 
-    // 轮询托盘/菜单事件。
+    // 轮询托盘/菜单事件 + 录制状态图标刷新。
     cx.spawn(async move |cx| {
         use tray_icon::menu::MenuEvent;
         use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+
+        // 集中驱动图标刷新：状态变化时更新托盘图标 + 任务栏角标（150ms 延迟无感）。
+        let mut last_status = crate::branding::IconStatus::Idle;
 
         loop {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
+
+            cx.update(|app| {
+                let status = view.read(app).current_icon_status();
+                if status != last_status {
+                    last_status = status;
+                    set_tray_status(status, app);
+                    if let Ok(Some(h)) = window.update(app, |_, win, _| window_hwnd(win)) {
+                        set_taskbar_overlay(h, status);
+                    }
+                }
+            });
 
             // 左键单击：切换主窗口显隐（显示则隐藏迷你条，互斥）。经 view 统一协调。
             while let Ok(event) = TrayIconEvent::receiver().try_recv() {
@@ -167,26 +181,23 @@ pub fn is_window_visible(window: &Window) -> bool {
     }
 }
 
-/// 程序化生成 32×32 的托盘图标（强调色实心圆），避免依赖图片资源。
-fn tray_icon_image() -> Option<tray_icon::Icon> {
-    const SIZE: u32 = 32;
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    let center = SIZE as f32 / 2.0;
-    let radius = 14.0_f32;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as f32 + 0.5 - center;
-            let dy = y as f32 + 0.5 - center;
-            if dx * dx + dy * dy <= radius * radius {
-                let idx = ((y * SIZE + x) * 4) as usize;
-                rgba[idx] = 0x4A;
-                rgba[idx + 1] = 0x90;
-                rgba[idx + 2] = 0xD9;
-                rgba[idx + 3] = 0xFF;
-            }
-        }
+/// 设置/清除任务栏按钮右下角的状态角标（ITaskbarList3，Win32-only）。
+fn set_taskbar_overlay(hwnd: isize, status: crate::branding::IconStatus) {
+    #[cfg(windows)]
+    overlay::set(hwnd, status);
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, status);
     }
-    tray_icon::Icon::from_rgba(rgba, SIZE, SIZE).ok()
+}
+
+/// 按图标状态刷新托盘图标（录制/转录态显示彩色徽标）。
+pub fn set_tray_status(status: crate::branding::IconStatus, cx: &App) {
+    if let Some(g) = cx.try_global::<GlobalTray>()
+        && let Some(icon) = crate::branding::tray_icon(status)
+    {
+        let _ = g.0.set_icon(Some(icon));
+    }
 }
 
 // ───────────────────────────── 平台相关：窗口显隐 ─────────────────────────────
@@ -254,5 +265,115 @@ mod winimpl {
 
     pub fn is_visible(h: isize) -> bool {
         unsafe { IsWindowVisible(hwnd(h)).as_bool() }
+    }
+}
+
+/// 任务栏状态角标：ITaskbarList3::SetOverlayIcon + 由 RGBA 造 HICON（GDI）。
+#[cfg(windows)]
+mod overlay {
+    use std::cell::RefCell;
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+
+    use windows::Win32::Foundation::{HWND, TRUE};
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    };
+    use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, DestroyIcon, HICON, ICONINFO};
+    use windows::core::PCWSTR;
+
+    use crate::branding::{IconStatus, render_badge_rgba};
+
+    thread_local! {
+        /// 缓存的 ITaskbarList3（首次使用时创建；轮询循环固定在主线程）。
+        static TASKBAR: RefCell<Option<ITaskbarList3>> = const { RefCell::new(None) };
+    }
+
+    fn taskbar() -> Option<ITaskbarList3> {
+        TASKBAR.with(|cell| {
+            if cell.borrow().is_none() {
+                unsafe {
+                    // 若 gpui 已初始化 COM（拖放），这里返回 S_FALSE/RPC_E_CHANGED_MODE 均无妨。
+                    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                    if let Ok(tb) =
+                        CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+                        && tb.HrInit().is_ok()
+                    {
+                        *cell.borrow_mut() = Some(tb);
+                    }
+                }
+            }
+            cell.borrow().clone()
+        })
+    }
+
+    pub fn set(h: isize, status: IconStatus) {
+        let Some(tb) = taskbar() else { return };
+        let hwnd = HWND(h as *mut c_void);
+        const SIZE: u32 = 20;
+        match render_badge_rgba(SIZE, status) {
+            Some(rgba) => {
+                if let Some(icon) = hicon_from_rgba(&rgba, SIZE as i32) {
+                    unsafe {
+                        let _ = tb.SetOverlayIcon(hwnd, icon, PCWSTR::null());
+                        // 任务栏会复制图标，随后销毁本地句柄避免泄漏。
+                        let _ = DestroyIcon(icon);
+                    }
+                }
+            }
+            // Idle：清除角标。
+            None => unsafe {
+                let _ = tb.SetOverlayIcon(hwnd, HICON::default(), PCWSTR::null());
+            },
+        }
+    }
+
+    /// 由直通 RGBA8 构造 32bpp alpha HICON。
+    fn hicon_from_rgba(rgba: &[u8], size: i32) -> Option<HICON> {
+        unsafe {
+            let mut bi = BITMAPINFO::default();
+            bi.bmiHeader.biSize = size_of::<windows::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
+            bi.bmiHeader.biWidth = size;
+            bi.bmiHeader.biHeight = -size; // 负高 = top-down
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = BI_RGB.0;
+
+            let mut bits: *mut c_void = null_mut();
+            let hbm_color =
+                CreateDIBSection(None, &bi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+            if bits.is_null() {
+                let _ = DeleteObject(hbm_color.into());
+                return None;
+            }
+            // RGBA(直通) → BGRA。
+            let px = (size * size) as usize;
+            let dst = std::slice::from_raw_parts_mut(bits as *mut u8, px * 4);
+            for i in 0..px {
+                dst[i * 4] = rgba[i * 4 + 2]; // B
+                dst[i * 4 + 1] = rgba[i * 4 + 1]; // G
+                dst[i * 4 + 2] = rgba[i * 4]; // R
+                dst[i * 4 + 3] = rgba[i * 4 + 3]; // A
+            }
+
+            // 单色掩码（全 0；32bpp 的透明由 alpha 通道处理）。
+            let hbm_mask = CreateBitmap(size, size, 1, 1, None);
+
+            let ii = ICONINFO {
+                fIcon: TRUE,
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: hbm_mask,
+                hbmColor: hbm_color,
+            };
+            let icon = CreateIconIndirect(&ii).ok();
+            let _ = DeleteObject(hbm_color.into());
+            let _ = DeleteObject(hbm_mask.into());
+            icon
+        }
     }
 }

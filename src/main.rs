@@ -8,6 +8,7 @@ mod app;
 mod asr;
 mod assets;
 mod audio;
+mod branding;
 mod autolaunch;
 mod config;
 mod diagnostics;

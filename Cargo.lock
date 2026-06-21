@@ -25,7 +25,9 @@ dependencies = [
  "hkdf",
  "hmac",
  "hound",
+ "ico",
  "machine-uid",
+ "png 0.17.16",
  "raw-window-handle",
  "reqwest",
  "ringbuf",
@@ -38,6 +40,7 @@ dependencies = [
  "sha1",
  "sha2",
  "thiserror 2.0.18",
+ "tiny-skia",
  "tokio",
  "tokio-tungstenite",
  "toml 0.8.23",
@@ -3511,6 +3514,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "ico"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc50b891e4acf8fe0e71ef88ec43ad82ee07b3810ad09de10f1d01f072ed4b98"
+dependencies = [
+ "byteorder",
+ "png 0.17.16",
 ]
 
 [[package]]

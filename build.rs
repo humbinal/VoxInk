@@ -1,6 +1,12 @@
 use std::io;
 use std::process::Command;
 
+// 复用运行期同一份纯绘制（只依赖 tiny-skia），保证 exe 图标 / 任务栏 / 托盘 / 主界面 logo 一致。
+// build 脚本仅用其中一部分，故对未用项放行 dead_code。
+#[allow(dead_code)]
+#[path = "src/branding/draw.rs"]
+mod draw;
+
 fn main() -> io::Result<()> {
     // 注入构建期信息：Git 短哈希 + 构建时间（供「关于」与诊断导出使用，M11 任务 11.4）。
     let git_hash = Command::new("git")
@@ -18,14 +24,46 @@ fn main() -> io::Result<()> {
     let build_time = build_timestamp();
     println!("cargo:rustc-env=VOXINK_BUILD_TIME={build_time}");
 
-    // 仅在编译目标为 Windows 系统时运行该注入逻辑
+    println!("cargo:rerun-if-changed=src/branding/draw.rs");
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+
+    // 主界面标题栏 logo（全平台）：按显示尺寸(18px)的 2 倍渲染，避免大幅缩放产生锯齿。
+    write_logo_png(&std::path::Path::new(&out_dir).join("voxink_logo.png"), 36);
+
+    // 程序化生成多尺寸 .ico（纯 Rust：tiny-skia 绘制 + ico 编码），再用 winresource 嵌入。
     #[cfg(target_os = "windows")]
     {
+        let ico_path = std::path::Path::new(&out_dir).join("voxink_icon.ico");
+        write_app_ico(&ico_path);
         winresource::WindowsResource::new()
-            .set_icon("assets/icon.ico") // 指定您的 ico 文件路径
+            .set_icon(ico_path.to_str().expect("ico path utf8"))
             .compile()?;
     }
     Ok(())
+}
+
+/// 渲染 Idle 品牌图标为 PNG（直通 RGBA8 → png 编码）。
+fn write_logo_png(path: &std::path::Path, size: u32) {
+    let rgba = draw::render_icon_rgba(size, draw::IconStatus::Idle);
+    let file = std::fs::File::create(path).expect("create logo png");
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), size, size);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().expect("png header");
+    w.write_image_data(&rgba).expect("png data");
+}
+
+/// 生成多尺寸应用图标（Idle 态，无状态徽标）并写入 .ico。
+#[cfg(target_os = "windows")]
+fn write_app_ico(path: &std::path::Path) {
+    let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
+    for size in [16u32, 24, 32, 48, 64, 128, 256] {
+        let rgba = draw::render_icon_rgba(size, draw::IconStatus::Idle);
+        let image = ico::IconImage::from_rgba_data(size, size, rgba);
+        dir.add_entry(ico::IconDirEntry::encode(&image).expect("encode ico entry"));
+    }
+    let file = std::fs::File::create(path).expect("create ico");
+    dir.write(file).expect("write ico");
 }
 
 /// 生成构建时间为 RFC3339 UTC（如 "2026-06-14T07:11:08Z"，无外部依赖）。

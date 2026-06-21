@@ -88,6 +88,8 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                         set_taskbar_overlay(h, status);
                     }
                 }
+                // 迷你条可见时：自适应宽度 + 记录位置（持久化）。
+                view.update(app, |v, vcx| v.tick_mini(vcx));
             });
 
             // 左键单击：切换主窗口显隐（显示则隐藏迷你条，互斥）。经 view 统一协调。

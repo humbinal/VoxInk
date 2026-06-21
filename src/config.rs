@@ -34,6 +34,16 @@ pub struct VoxInkConfig {
     pub storage: StorageConfig,
     pub window: WindowConfig,
     pub polish: PolishConfig,
+    pub mini: MiniConfig,
+}
+
+/// 迷你条窗口位置（物理像素，跨会话持久化）。`saved=false` 时用默认右上角。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MiniConfig {
+    pub saved: bool,
+    pub x: i32,
+    pub y: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +273,7 @@ impl Default for VoxInkConfig {
             storage: StorageConfig::default(),
             window: WindowConfig::default(),
             polish: PolishConfig::default(),
+            mini: MiniConfig::default(),
         }
     }
 }

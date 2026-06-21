@@ -24,8 +24,8 @@ use crate::i18n::tr;
 use crate::state::{RecordingState, TranscriptionMode};
 use crate::theme::{BRAND, STATUS_PROCESSING, STATUS_RECORDING};
 
-/// 迷你条窗口尺寸（px）。
-pub const MINI_W: f32 = 360.0;
+/// 迷你条窗口尺寸（px）。宽度运行期随内容自适应（见 [`desired_width`]），此为初始值。
+pub const MINI_W: f32 = 280.0;
 pub const MINI_H: f32 = 40.0;
 /// 窄波形竖条数量（也即 [`VoxInk::mini_snapshot`] 回传的电平尾巴长度）。
 pub const MINI_WAVE_BARS: usize = 16;
@@ -90,11 +90,11 @@ impl Render for MiniBar {
             // 开始/停止按钮置于最前。
             .child(self.toggle_button(recording, clickable, cx))
             .child(
-                // 拖拽区：录制状态图标 + 模式 + 波形 + 时长 + 字数。
-                // 标 Drag 即整片 HTCAPTION；按钮须为其**兄弟**（CLAUDE.md）。
+                // 拖拽区：录制状态图标 + 模式 + 波形 + 时长 + 字数。flex_1 吸收多余宽度——
+                // 多出的间距留在字数之后，↗/✕ 始终靠右对齐。标 Drag 即整片 HTCAPTION；
+                // 按钮须为其**兄弟**（CLAUDE.md）。
                 h_flex()
                     .flex_1()
-                    .min_w_0()
                     .h_full()
                     .items_center()
                     .gap_2()
@@ -164,7 +164,7 @@ impl MiniBar {
             .cursor_pointer()
             .text_color(cx.theme().muted_foreground)
             .hover(|s| s.bg(cx.theme().list_hover).text_color(cx.theme().foreground))
-            .child(Icon::new(IconName::Minus).size(px(13.)))
+            .child(Icon::new(IconName::Close).size(px(16.)))
             .on_click(cx.listener(|mini, _, _window, cx| {
                 let main = mini.main_window;
                 let view = mini.voxink.clone();
@@ -277,6 +277,35 @@ fn bar_height(level: f32) -> f32 {
     WAVE_MIN + norm * (WAVE_MAX - WAVE_MIN)
 }
 
+/// 估算迷你条贴合内容所需的逻辑宽度（用于运行期自适应 resize）。
+///
+/// 固定元素（按钮/麦克/波形/间距/内边距）+ 文本估宽（模式/时长/字数随内容变化）。
+/// 文本按字符估宽（CJK 比 ASCII 宽）；略偏大以免裁切。
+pub fn desired_width(snap: &MiniSnapshot) -> f32 {
+    let mode = match snap.mode {
+        TranscriptionMode::Streaming => tr("mode.streaming"),
+        TranscriptionMode::Offline => tr("mode.offline"),
+    };
+    let duration = format!("{:02}:{:02}", snap.duration_secs / 60, snap.duration_secs % 60);
+    let chars_label = format!("{} {}", snap.chars, tr("mini.chars_suffix"));
+
+    // 文本估宽：ASCII / CJK 不同字宽（含字号差异——时长用 text_sm，余用 text_xs）。
+    let text_w = |s: &str, ascii: f32, cjk: f32| -> f32 {
+        s.chars()
+            .map(|c| if (c as u32) > 0x2E80 { cjk } else { ascii })
+            .sum()
+    };
+    let mode_w = text_w(&mode, 7.0, 13.0);
+    let dur_w = text_w(&duration, 8.5, 14.0);
+    let chars_w = text_w(&chars_label, 7.0, 13.0);
+    let wave_w = MINI_WAVE_BARS as f32 * 2.0 + (MINI_WAVE_BARS as f32 - 1.0);
+
+    // 固定：左右 px_2(16) + 开关/麦克/打开主窗/隐藏(各 20/15/20/20) + 7 个 gap_2(8)。
+    let fixed = 16.0 + 20.0 + 15.0 + 20.0 + 20.0 + 7.0 * 8.0 + wave_w;
+    // 略偏大（+10）：宁可字数后留一点空隙，也不要把内容挤裁。
+    (fixed + mode_w + dur_w + chars_w + 10.0).clamp(180.0, 560.0)
+}
+
 /// 迷你窗口的创建参数：无边框（PopUp 给 `WINDOW_STYLE(0)`）+ 不进任务栏 + 不抢焦点。
 pub fn window_options() -> WindowOptions {
     WindowOptions {
@@ -293,14 +322,14 @@ pub fn window_options() -> WindowOptions {
     }
 }
 
-/// 显示并置顶：移到主屏工作区右上角（距顶 ~100px、距右 ~40px）。
-pub fn show_topmost(window: &Window) {
+/// 显示并置顶：有保存位置则用之，否则默认右上角（距顶 ~100px、距右 ~40px）。
+pub fn show_at(window: &Window, saved: Option<(i32, i32)>) {
     #[cfg(windows)]
     if let Some(h) = window_hwnd(window) {
-        winimpl::show_topmost(h, MINI_W as i32, MINI_H as i32);
+        winimpl::show_at(h, saved);
     }
     #[cfg(not(windows))]
-    let _ = window;
+    let _ = (window, saved);
 }
 
 /// 隐藏迷你窗。
@@ -311,6 +340,19 @@ pub fn hide(window: &Window) {
     }
     #[cfg(not(windows))]
     let _ = window;
+}
+
+/// 读取迷你窗当前屏幕位置（物理像素左上角），用于位置持久化。
+pub fn window_pos(window: &Window) -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        window_hwnd(window).and_then(winimpl::window_pos)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -329,12 +371,29 @@ mod winimpl {
 
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        HWND_TOPMOST, SPI_GETWORKAREA, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, ShowWindow, SystemParametersInfoW,
+        GetWindowRect, HWND_TOPMOST, SPI_GETWORKAREA, SW_HIDE, SWP_NOACTIVATE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, ShowWindow,
+        SystemParametersInfoW,
     };
 
     fn hwnd(h: isize) -> HWND {
         HWND(h as *mut c_void)
+    }
+
+    /// 当前窗口物理尺寸宽度（用于默认右上角定位）。
+    fn window_width(h: isize) -> i32 {
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(hwnd(h), &mut r) }.is_ok() {
+            r.right - r.left
+        } else {
+            280
+        }
+    }
+
+    pub fn window_pos(h: isize) -> Option<(i32, i32)> {
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(hwnd(h), &mut r) }.ok()?;
+        Some((r.left, r.top))
     }
 
     fn work_area() -> RECT {
@@ -358,20 +417,21 @@ mod winimpl {
         rect
     }
 
-    /// 置顶并移到工作区右上角（距顶 100px、距右 40px）。
-    pub fn show_topmost(h: isize, w: i32, height: i32) {
-        let wa = work_area();
-        let x = wa.right - w - 40;
-        let y = wa.top + 100;
+    /// 显示并置顶到给定/默认位置（仅移动不改尺寸——宽度由 gpui 逻辑 resize 管理）。
+    pub fn show_at(h: isize, saved: Option<(i32, i32)>) {
+        let (x, y) = saved.unwrap_or_else(|| {
+            let wa = work_area();
+            (wa.right - window_width(h) - 40, wa.top + 100)
+        });
         unsafe {
             let _ = SetWindowPos(
                 hwnd(h),
                 Some(HWND_TOPMOST),
                 x,
                 y,
-                w,
-                height,
-                SWP_SHOWWINDOW | SWP_NOACTIVATE,
+                0,
+                0,
+                SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOSIZE,
             );
         }
     }

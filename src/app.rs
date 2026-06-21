@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use gpui::{
-    deferred, div, ease_in_out, img, prelude::*, px, relative, white, Animation, AnimationExt, AnyElement,
+    deferred, div, ease_in_out, img, prelude::*, px, relative, size, white, Animation, AnimationExt, AnyElement,
     App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
     WindowControlArea, WindowHandle,
@@ -1288,9 +1288,10 @@ impl VoxInk {
     /// 首帧会 read 主视图，若在主视图 update 内进行会触发"read while being updated"panic。
     fn show_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mini_visible = true;
+        let saved = self.saved_mini_pos(cx);
         if let Some(handle) = self.mini_window {
             cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, win, _| crate::mini::show_topmost(win));
+                let _ = handle.update(cx, |_, win, _| crate::mini::show_at(win, saved));
             });
             return;
         }
@@ -1303,7 +1304,7 @@ impl VoxInk {
             });
             match handle {
                 Ok(handle) => {
-                    let _ = handle.update(cx, |_, win, _| crate::mini::show_topmost(win));
+                    let _ = handle.update(cx, |_, win, _| crate::mini::show_at(win, saved));
                     view.update(cx, |this, _| this.mini_window = Some(handle));
                 }
                 Err(e) => tracing::error!("打开迷你条窗口失败: {e:#}"),
@@ -1314,17 +1315,54 @@ impl VoxInk {
     /// 设置迷你条可见性（纯显隐，不创建）。
     fn set_mini_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.mini_visible = visible;
+        let saved = if visible { self.saved_mini_pos(cx) } else { None };
         if let Some(handle) = self.mini_window {
             cx.defer(move |cx| {
                 let _ = handle.update(cx, |_, win, _| {
                     if visible {
-                        crate::mini::show_topmost(win);
+                        crate::mini::show_at(win, saved);
                     } else {
                         crate::mini::hide(win);
                     }
                 });
             });
         }
+    }
+
+    /// 已保存的迷你条位置（物理像素），无则 None（用默认右上角）。
+    fn saved_mini_pos(&self, cx: &App) -> Option<(i32, i32)> {
+        cx.try_global::<GlobalConfig>()
+            .filter(|g| g.0.mini.saved)
+            .map(|g| (g.0.mini.x, g.0.mini.y))
+    }
+
+    /// 迷你条可见时的周期性维护（托盘轮询每 ~150ms 调用）：
+    /// 按内容自适应窗口宽度 + 记录当前位置到配置（供持久化）。
+    pub fn tick_mini(&mut self, cx: &mut Context<Self>) {
+        if !self.mini_visible {
+            return;
+        }
+        let Some(handle) = self.mini_window else {
+            return;
+        };
+        let snap = self.mini_snapshot(cx);
+        let w = crate::mini::desired_width(&snap);
+        let _ = handle.update(cx, |_, win, app| {
+            // 宽度自适应（gpui 逻辑像素，DPI 由 gpui 处理）。
+            let cur = f32::from(win.bounds().size.width);
+            if (cur - w).abs() > 1.5 {
+                win.resize(size(px(w), px(crate::mini::MINI_H)));
+            }
+            // 记录当前位置（物理像素）到配置，供隐藏/重启后恢复。
+            if let Some((x, y)) = crate::mini::window_pos(win) {
+                let m = &mut app.global_mut::<GlobalConfig>().0.mini;
+                if !m.saved || m.x != x || m.y != y {
+                    m.saved = true;
+                    m.x = x;
+                    m.y = y;
+                }
+            }
+        });
     }
 
     /// 隐藏迷你条（收回托盘）。供迷你条上的"隐藏"按钮调用。

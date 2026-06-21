@@ -15,11 +15,11 @@ use chrono::{DateTime, Local};
 use gpui::{
     deferred, div, ease_in_out, img, prelude::*, px, relative, size, white, Animation, AnimationExt, AnyElement,
     App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
-    ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
+    ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
     WindowControlArea, WindowHandle,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::Notification, scroll::{Scrollbar, ScrollbarShow}, v_flex, ActiveTheme,
+    button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState, RopeExt}, notification::Notification, scroll::{Scrollbar, ScrollbarShow}, v_flex, ActiveTheme,
     Disableable,
     Icon,
     IconName,
@@ -2432,12 +2432,24 @@ impl VoxInk {
         div().flex_1().w_full().px_4().pb_1().child(
             div()
                 .size_full()
-                .p_1()
+                // 垂直留白放到外层：编辑器内部的 input_py 与其滚动条轨道高度口径不一致
+                // （轨道高度被算成 input_bounds.height + 上下内边距，而内容高度不含内边距），
+                // 导致**拖拽滚动条**最多只能滚到「真正底部 - 内边距」、最后一行拖不出来（滚轮没此问题，
+                // 见 gpui-component element.rs::EditorScrollbarLayout）。把编辑器垂直内边距清零、留白
+                // 改由外层提供，使轨道高度与内容高度一致，拖拽即可到底。水平内边距维持原样。
+                // py_3(12px) = 原 p_1(4px) + Medium 的 input_py(8px)，视觉留白不变。
+                .px_1()
+                .py_3()
                 .bg(cx.theme().background)
                 .border_1()
                 .border_color(cx.theme().border)
                 .rounded(px(10.))
-                .child(Input::new(&self.editor).h_full().bordered(false)),
+                .child(
+                    Input::new(&self.editor)
+                        .h_full()
+                        .bordered(false)
+                        .py(px(0.)),
+                ),
         )
     }
 
@@ -3190,6 +3202,53 @@ fn append_text(
         }
         value.push_str(text);
         state.set_value(value, window, cx);
+        // set_value 默认把光标置于开头、滚动条置顶；识别追加后让光标立即落到文本末尾
+        // （光标位置与布局无关，可同步生效）。
+        caret_to_end(state, window, cx);
+    });
+
+    // 此处的滚动基于编辑器**已持久化**的 scroll_size——它只在每次绘制后更新（state.rs:2200）。
+    // 追加文本后、新行尚未经过一次绘制布局前，scroll_size 仍是旧值；当原内容很短时旧
+    // scroll_size≈视口高度，使 scroll_to 的钳制下限 safe_y_min=-scroll_size+视口 退化为 0，
+    // 于是头几帧滚动量被钳成 (0,0)、根本没动。必须跨帧反复滚到末尾、直到内容高度稳定为止。
+    stick_editor_to_bottom(editor.clone(), None, 0, window, cx);
+}
+
+/// 把编辑器光标移到文本末尾，并把视口滚动到该位置（`set_cursor_position` 内部经 `move_to`
+/// → `scroll_to`，多行编辑器即滚到底）。
+fn caret_to_end(state: &mut InputState, window: &mut Window, cx: &mut Context<InputState>) {
+    let end = state.text().offset_to_position(state.text().len());
+    state.set_cursor_position(end, window, cx);
+}
+
+/// 跨帧把编辑器钉在底部：每帧重新滚到末尾，直到滚动偏移收敛（内容高度稳定）或到达上限。
+///
+/// 必要性见 [`append_text`]：追加文本后 `scroll_size` 要等下一次绘制完成布局才更新（软换行的
+/// 换行/行高测量可能再需几帧）。`on_next_frame` 回调在绘制前执行，所以最初几帧读到/算出的都是
+/// 旧 `scroll_size` 下的结果——内容原本很短时该结果恒为 (0,0)。若此时就用「连续两帧偏移一致」
+/// 判定收敛会**假性命中**而提前停住、根本没滚动。故前 `WARMUP` 帧只滚不判停，越过预热期后再用
+/// 「偏移不再变化」收敛；`MAX` 为兜底上限。`frame` 是已执行的帧序号（从 0 起）。
+fn stick_editor_to_bottom(
+    editor: Entity<InputState>,
+    prev_offset: Option<Point<Pixels>>,
+    frame: u8,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // 预热期：覆盖「追加→首帧绘制刷新 scroll_size」的延迟（约 2~3 帧），期间不允许据偏移判停。
+    const WARMUP: u8 = 4;
+    // 兜底上限：内容高度始终稳定不了时也不至于无限重排。
+    const MAX: u8 = 16;
+
+    let current = editor.read(cx).scroll_offset();
+    let settled = frame >= WARMUP && prev_offset == Some(current);
+    if frame >= MAX || settled {
+        return;
+    }
+    editor.update(cx, |state, cx| caret_to_end(state, window, cx));
+    window.refresh();
+    window.on_next_frame(move |window, cx| {
+        stick_editor_to_bottom(editor, Some(current), frame + 1, window, cx);
     });
 }
 

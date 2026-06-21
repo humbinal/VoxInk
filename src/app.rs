@@ -25,7 +25,6 @@ use gpui_component::{
     IconName,
     Root,
     Sizable,
-    tooltip::Tooltip,
     WindowExt,
 };
 
@@ -2078,24 +2077,22 @@ impl VoxInk {
 
         if is_idle {
             row = row.child(
+                // 外层 div 仅负责「默认隐藏 / 悬停本行才显示」（保留占位避免文字抖动）；
+                // 内层用 gpui-component Button，其 tooltip 经 managed_tooltip 锚定在按钮**正上方**
+                // （与录音片段列表的删除按钮一致），而非裸 div tooltip 跟随鼠标右下角。
                 div()
-                    .id(elem_id("recdel", &rec.id))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(22.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    // 默认隐藏（保留占位，避免悬停时文字抖动），悬停本行时显示。
                     .invisible()
                     .group_hover("recrow", |s| s.visible())
-                    .text_color(cx.theme().muted_foreground)
-                    .hover(|s| s.text_color(DANGER))
-                    .tooltip(|window, cx| Tooltip::new(tr("sidebar.delete")).build(window, cx))
-                    .child(Icon::new(IconName::Delete).size(px(13.)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.delete_record(del_id.clone(), window, cx)
-                    })),
+                    .child(
+                        Button::new(elem_id("recdel", &rec.id))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Delete)
+                            .tooltip(tr("sidebar.delete"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.delete_record(del_id.clone(), window, cx)
+                            })),
+                    ),
             );
         }
         row

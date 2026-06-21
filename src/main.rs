@@ -28,24 +28,72 @@ use assets::VoxInkAssets;
 use config::VoxInkConfig;
 use gpui::{App, Bounds, Entity, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::{Root, TitleBar};
-use tracing_subscriber::EnvFilter;
+use rolling_file::{RollingConditionBasic, RollingFileAppender};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
 
 // 多语言词典（编译期嵌入 crate 根 `locales/`），缺省回退简体中文（M11 任务 11.3）。
 rust_i18n::i18n!("locales", fallback = "zh-CN");
 
-fn init_tracing() {
-    // 默认：应用自身 INFO；屏蔽 gpui Windows 后端的伪错误噪声 ——
-    // `gpui_windows::events` 会把 GetLastError==0（"操作成功完成。 0x0"）当成 ERROR 打印；
-    // `gpui_windows::window` / `gpui::window` 会在窗口关闭时打印句柄失效日志。均非真实错误。
-    // 需要查看完整日志时用 RUST_LOG 覆盖（如 `RUST_LOG=debug`）。
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,gpui_windows::events=off,gpui_windows::window=off,gpui::window=off")
-    });
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+/// 构建滚动文件日志写入器：`%LOCALAPPDATA%\VoxInk\logs\voxink.log`，
+/// 按天 **或** 单文件超过 10MB 任一触发即滚动（rolling-file 双条件），保留最近 14 个历史文件。
+fn build_file_appender() -> Result<RollingFileAppender<RollingConditionBasic>> {
+    let dir = VoxInkConfig::log_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("voxink.log");
+    let condition = RollingConditionBasic::new()
+        .daily()
+        .max_size(10 * 1024 * 1024);
+    let appender = RollingFileAppender::new(&path, condition, 14)
+        .map_err(|e| anyhow::anyhow!("无法创建日志文件 {}: {e}", path.display()))?;
+    Ok(appender)
+}
+
+/// 初始化日志：始终写滚动文件（release 关键——`windows` 子系统无控制台，否则日志全丢），
+/// 并保留控制台层（debug 终端 / release 从已有终端启动时可见）。
+///
+/// 默认过滤：应用自身 INFO；屏蔽 gpui Windows 后端的伪错误噪声 ——
+/// `gpui_windows::events` 会把 GetLastError==0（"操作成功完成。 0x0"）当成 ERROR 打印；
+/// `gpui_windows::window` / `gpui::window` 会在窗口关闭时打印句柄失效日志。均非真实错误。
+/// 需要查看完整日志时用 RUST_LOG 覆盖（如 `RUST_LOG=debug`）。
+///
+/// 返回的 [`WorkerGuard`] 必须在 `main` 全程持有，否则非阻塞写入 worker 的缓冲日志会丢失。
+fn init_tracing() -> Option<WorkerGuard> {
+    let filter = || {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(
+                "info,gpui_windows::events=off,gpui_windows::window=off,gpui::window=off",
+            )
+        })
+    };
+    // EnvFilter 不是 Clone，控制台与文件各取一份（语义一致）。
+    let console_layer = fmt::layer().with_filter(filter());
+
+    match build_file_appender() {
+        Ok(appender) => {
+            let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+            let file_layer = fmt::layer()
+                .with_ansi(false) // 文件里不要 ANSI 颜色转义码
+                .with_writer(non_blocking)
+                .with_filter(filter());
+            tracing_subscriber::registry()
+                .with(console_layer)
+                .with(file_layer)
+                .init();
+            Some(guard)
+        }
+        Err(e) => {
+            tracing_subscriber::registry().with(console_layer).init();
+            tracing::warn!("文件日志初始化失败，仅控制台输出: {e:#}");
+            None
+        }
+    }
 }
 
 fn main() -> Result<()> {
-    init_tracing();
+    // guard 须持有至 main 结束，否则非阻塞日志 worker 的缓冲会在退出时丢失。
+    let _log_guard = init_tracing();
 
     // 创建 Tokio 多线程运行时，供音频 I/O、网络等耗时任务调度。
     let runtime = tokio::runtime::Builder::new_multi_thread()

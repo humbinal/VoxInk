@@ -885,9 +885,24 @@ ASR 能力通过 trait 抽象实现后端可插拔，支持：
 - 按附录 A 创建目录（初期只需 `src/`、`docs/`、`assets/` 及基本文件）。
 
 **任务 1.3: 实现应用入口（`src/main.rs`）**
-- 初始化 `tracing_subscriber`（控制台输出，默认 INFO）。
+- 初始化 `tracing_subscriber`，默认 INFO，**控制台 + 滚动文件双输出**（设计见下方「日志输出设计」）。
 - 创建 Tokio runtime。
 - 启动 GPUI 应用，创建主窗口（480×600）。
+
+> 📝 **日志输出设计（2026-06-21 补充）**
+> - **问题**：release 用 `#![windows_subsystem = "windows"]`（GUI 子系统、无控制台），原先仅 `fmt()` 输出到
+>   stdout/stderr 的日志在双击运行时**无处可去、全部丢弃**，正式发布场景无任何排障信息。
+> - **方案**：`init_tracing` 用 `tracing_subscriber::registry()` 挂**两层**——
+>   - **文件层**（始终启用，关键）：写 `%LOCALAPPDATA%\VoxInk\logs\voxink.log`，`.with_ansi(false)`（不写颜色转义码）；
+>     经 `tracing-appender` 非阻塞 worker 写入，返回的 `WorkerGuard` 须在 `main` 全程持有，否则退出时缓冲日志丢失。
+>   - **控制台层**：debug 终端 / release 从已有终端启动时可见；无终端时自然丢弃。
+> - **滚动策略**：`rolling-file` 的 `RollingConditionBasic::new().daily().max_size(10MB)`——**按天或单文件超 10MB
+>   任一触发即滚动**（`tracing-appender` 只支持时间滚动，故引入 `rolling-file` 拿大小维度），保留最近 **14** 个历史文件
+>   （Debian 式命名 `voxink.log.1`/`.2`…）。
+> - **依赖**：新增纯 Rust `tracing-appender` + `rolling-file`（符合 §1「零 C 工具链」第一原则）。
+> - **目录约定**：日志与录音归档同放本地数据目录（`%LOCALAPPDATA%\VoxInk\`，不放可漫游 config），
+>   helper `VoxInkConfig::log_dir()` 解析，失败时优雅降级为仅控制台 + warn，不阻塞启动。
+> - **入口**：设置面板「关于」区提供「打开日志文件夹」按钮（见 M11）。需要更详细日志仍可用 `RUST_LOG` 覆盖。
 
 **任务 1.4: 定义基础状态（`src/state.rs`）**
 - 📐 按 [§2.1 应用状态契约](#21-应用状态契约--srcstaters) 定义 `RecordingState`、`TranscriptionMode` 及 `AppState` 字段。
@@ -1294,7 +1309,7 @@ ffprobe <生成的 wav 文件>
 - 用 `rust-i18n` 定义中/英翻译键；设置中切换语言后 UI 即时更新。
 
 **任务 11.4: 关于面板**
-- 版本号、构建时间、Git commit hash（`env!` 宏注入）；协议链接；"导出诊断信息"按钮。
+- 版本号、构建时间、Git commit hash（`env!` 宏注入）；协议链接；"导出诊断信息"按钮；"打开日志文件夹"按钮（`cx.open_with_system(log_dir)`，目录不存在则先创建；日志设计见任务 1.3）。
 
 > 📝 **M11 落地说明（2026-06-14）**：
 > - **设置面板形态**：实现为**全屏覆盖层**（`SettingsView` 子视图，主视图 `show_settings` 控制显隐），
@@ -1316,6 +1331,7 @@ ffprobe <生成的 wav 文件>
 - [ ] 深色/浅色主题切换流畅
 - [ ] 中英文界面切换正常
 - [ ] "导出诊断信息"生成完整文件
+- [ ] "打开日志文件夹"能在文件管理器中定位 `%LOCALAPPDATA%\VoxInk\logs`
 
 ---
 

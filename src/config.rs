@@ -377,6 +377,13 @@ impl VoxInkConfig {
         Ok(base.config_dir().join("VoxInk").join("config.toml"))
     }
 
+    /// 日志目录：`{平台本地数据目录}/VoxInk/logs`（Windows 为 `%LOCALAPPDATA%`）。
+    /// 与录音归档同放本地数据目录，不放可漫游的配置目录。
+    pub fn log_dir() -> Result<PathBuf> {
+        let base = BaseDirs::new().context("无法定位用户数据目录")?;
+        Ok(base.data_local_dir().join("VoxInk").join("logs"))
+    }
+
     /// 加载配置；文件不存在或解析失败时返回默认值（并记录日志）。
     /// 读取后会把密文 `api_key` 解密为内存中的明文。
     pub fn load() -> Self {

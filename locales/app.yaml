@@ -424,6 +424,9 @@ about.commit:
 about.export_diag:
   zh-CN: 导出诊断信息
   en: Export diagnostics
+about.open_logs:
+  zh-CN: 打开日志文件夹
+  en: Open log folder
 about.license:
   zh-CN: 开源协议
   en: License

@@ -590,6 +590,21 @@ impl SettingsView {
         }
     }
 
+    /// 在系统文件管理器中打开日志文件夹（`%LOCALAPPDATA%\VoxInk\logs`）。
+    /// 目录尚不存在时（极早期失败）先创建，避免打开一个不存在的路径。
+    fn on_open_logs(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match crate::config::VoxInkConfig::log_dir() {
+            Ok(dir) => {
+                let _ = std::fs::create_dir_all(&dir);
+                cx.open_with_system(&dir);
+            }
+            Err(e) => {
+                tracing::error!("无法定位日志目录: {e:#}");
+                notify(window, "无法定位日志目录", cx);
+            }
+        }
+    }
+
     /// 保存当前页配置：把输入框并入内存配置并落盘（停留在面板，给出反馈）。
     fn on_save(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_inputs_to_config(cx);
@@ -1493,13 +1508,23 @@ impl Render for SettingsView {
                     ))
                     .child(self.about_row("about.commit", crate::diagnostics::GIT_HASH, cx))
                     .child(
-                        div().pt_2().child(
-                            Button::new("export-diag")
-                                .outline()
-                                .small()
-                                .label(tr("about.export_diag"))
-                                .on_click(cx.listener(Self::on_export_diag)),
-                        ),
+                        h_flex()
+                            .pt_2()
+                            .gap_2()
+                            .child(
+                                Button::new("export-diag")
+                                    .outline()
+                                    .small()
+                                    .label(tr("about.export_diag"))
+                                    .on_click(cx.listener(Self::on_export_diag)),
+                            )
+                            .child(
+                                Button::new("open-logs")
+                                    .outline()
+                                    .small()
+                                    .label(tr("about.open_logs"))
+                                    .on_click(cx.listener(Self::on_open_logs)),
+                            ),
                     )
             });
 

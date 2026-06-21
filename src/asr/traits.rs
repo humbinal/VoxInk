@@ -29,6 +29,15 @@ pub trait AsrBackend: Send + Sync + 'static {
     /// 本后端是否支持离线整段识别。
     fn supports_offline(&self) -> bool;
 
+    /// 本后端单次录音的硬时长上限（秒）。`None` = 无后端侧限制，仅受用户配置的
+    /// `max_recording_seconds` 约束。
+    ///
+    /// 用于录制侧**提前自动停止**：例如离线同步后端受请求体（~10MB base64）限制，
+    /// 录太久会在上传阶段失败，故在达到能力上限时就停止录音，而非录完才报错。
+    fn max_recording_seconds(&self) -> Option<u32> {
+        None
+    }
+
     /// 验证配置是否有效（如测试 API Key 连通性）。
     async fn validate_config(&self, config: &AsrConfig) -> Result<(), AsrError>;
 

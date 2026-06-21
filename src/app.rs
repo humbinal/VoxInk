@@ -521,6 +521,27 @@ impl VoxInk {
             .unwrap_or(600)
     }
 
+    /// 本次录音的实际自动停止上限（秒）：取用户配置与**当前模式所选后端**能力上限的较小值。
+    /// 流式/自建等无后端侧上限的后端用满用户配置（最高 10 小时）；离线同步等受请求体限制的
+    /// 后端则提前停止，避免录完才在上传阶段失败。
+    fn effective_max_recording_seconds(&self, cx: &Context<Self>, streaming: bool) -> u32 {
+        let user_max = self.max_recording_seconds(cx);
+        let backend_id = cx.try_global::<GlobalConfig>().map(|g| {
+            if streaming {
+                g.0.asr.streaming_backend.clone()
+            } else {
+                g.0.asr.offline_backend.clone()
+            }
+        });
+        let backend_cap = backend_id
+            .and_then(|id| BackendRegistry::with_builtins().get(&id))
+            .and_then(|b| b.max_recording_seconds());
+        match backend_cap {
+            Some(cap) => user_max.min(cap),
+            None => user_max,
+        }
+    }
+
     // ───────────────────────────── 麦克风选择（2026-06-19）─────────────────────────────
 
     /// 当前配置的首选麦克风名（空 = 系统默认 → None）。
@@ -852,7 +873,7 @@ impl VoxInk {
                 self.state.recording_duration_secs = 0;
                 tracing::info!("开始录音");
                 cx.notify();
-                let max = self.max_recording_seconds(cx);
+                let max = self.effective_max_recording_seconds(cx, false);
                 self.spawn_timer(window, cx, max);
                 self.spawn_level_poll(window, cx);
             }
@@ -1028,7 +1049,7 @@ impl VoxInk {
             let _ = done_tx.send(result);
         });
 
-        let max = self.max_recording_seconds(cx);
+        let max = self.effective_max_recording_seconds(cx, true);
         self.spawn_timer(window, cx, max);
         self.spawn_level_poll(window, cx);
 

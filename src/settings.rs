@@ -28,6 +28,8 @@ use crate::state::TranscriptionMode;
 use crate::theme::{BRAND, DANGER, MODE_OFFLINE, MODE_STREAMING};
 
 const FILETRANS_ID: &str = "aliyun_bailian_filetrans";
+/// 最长录音时长的可设上限：10 小时。防止用户误设过大值导致长时间录制忘记停止。
+const MAX_RECORDING_SECONDS_LIMIT: u32 = 10 * 60 * 60;
 /// 设置面板宽度（px）。固定居中覆盖层，与主窗口尺寸无关；上限取主窗口最小宽度（640）以免溢出。
 /// 设置面板宽度上限（窗口足够宽时不再继续变宽）。
 const PANEL_MAX_WIDTH: f32 = 820.0;
@@ -408,7 +410,7 @@ impl SettingsView {
             if let Ok(n) = max.trim().parse::<u32>()
                 && n > 0
             {
-                c.asr.max_recording_seconds = n;
+                c.asr.max_recording_seconds = n.min(MAX_RECORDING_SECONDS_LIMIT);
             }
         });
     }
@@ -795,6 +797,14 @@ impl SettingsView {
                 tr("settings.api_key_env_hint"),
                 crate::app::api_key_env_var(backend_id)
             ))
+    }
+
+    /// 所选后端的单次录音硬时长上限（秒），无后端侧限制时返回 None。
+    /// 仅离线同步等受请求体大小限制的后端会返回 Some（届时录制将提前自动停止）。
+    fn backend_cap_secs(id: &str) -> Option<u32> {
+        BackendRegistry::with_builtins()
+            .get(id)
+            .and_then(|b| b.max_recording_seconds())
     }
 
     fn labeled(&self, label_key: &str, control: impl IntoElement) -> impl IntoElement {
@@ -1224,6 +1234,19 @@ impl Render for SettingsView {
                         cx,
                     ),
                 ))
+                // 所选离线后端有硬时长上限（如离线同步受 ~10MB 请求体限制）时，提示能力受限 + 会自动停止。
+                .when_some(Self::backend_cap_secs(&cfg.asr.offline_backend), |this, cap| {
+                    this.child(
+                        div()
+                            .pt_1()
+                            .text_xs()
+                            .text_color(DANGER)
+                            .child(
+                                rust_i18n::t!("settings.offline_cap_hint", min => cap / 60)
+                                    .to_string(),
+                            ),
+                    )
+                })
                 // 与实时共用同一后端时，仅给出提示，不重复渲染输入框（避免双份编辑互相覆盖）。
                 .when(off_shared, |this| {
                     this.child(
@@ -1306,6 +1329,12 @@ impl Render for SettingsView {
                         "settings.max_seconds",
                         div().w(px(120.)).child(Input::new(&self.max_secs).small()),
                     ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr("settings.max_seconds_hint")),
+                    )
                     .child(self.segment_legend(cx))
             })
             // ── AI 润色 ──

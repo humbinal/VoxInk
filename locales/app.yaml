@@ -190,6 +190,12 @@ settings.audio_feedback:
 settings.max_seconds:
   zh-CN: 最长录音时长（秒）
   en: Max recording seconds
+settings.max_seconds_hint:
+  zh-CN: 到时自动停止并转写；上限 10 小时（36000 秒），防止忘记停止
+  en: Auto-stops and transcribes at the limit; max 10 hours (36000 s) to guard against forgotten recordings
+settings.offline_cap_hint:
+  zh-CN: 该后端单次录音能力有限（约 %{min} 分钟），达到上限将自动停止录制
+  en: This backend supports only short recordings (~%{min} min); recording auto-stops at its limit
 settings.segment_legend_hint:
   zh-CN: 录音片段列表中每段前的圆点表示该段的转写模式：
   en: "The dot before each clip in the segment list marks its transcription mode:"

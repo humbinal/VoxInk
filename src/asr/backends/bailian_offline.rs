@@ -22,6 +22,11 @@ const DEFAULT_ENDPOINT: &str = "https://dashscope.aliyuncs.com/compatible-mode/v
 const MODEL: &str = "qwen3-asr-flash";
 /// 同步接口音频上限约 10MB；base64 膨胀约 1.33x，故对原始字节取更保守的 7MB 上限。
 const MAX_AUDIO_BYTES: usize = 7 * 1024 * 1024;
+/// 16kHz / mono / PCM16 的字节率。
+const BYTES_PER_SEC: usize = 16_000 * 2;
+/// 由 `MAX_AUDIO_BYTES` 推导的单次录音秒数上限，再留 10% 余量防止边界超限。
+/// 约 7MB / 32KB·s⁻¹ ≈ 229s → ~206s（3:26），契合"约 3-4 分钟"。
+pub const MAX_RECORDING_SECS: u32 = (MAX_AUDIO_BYTES / BYTES_PER_SEC * 9 / 10) as u32;
 
 pub struct BailianOfflineBackend {
     client: reqwest::Client,
@@ -73,6 +78,10 @@ impl AsrBackend for BailianOfflineBackend {
 
     fn supports_offline(&self) -> bool {
         true
+    }
+
+    fn max_recording_seconds(&self) -> Option<u32> {
+        Some(MAX_RECORDING_SECS)
     }
 
     async fn validate_config(&self, config: &AsrConfig) -> Result<(), AsrError> {
@@ -197,5 +206,21 @@ fn map_reqwest_error(e: reqwest::Error) -> AsrError {
         AsrError::Timeout
     } else {
         AsrError::NetworkError(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_recording_cap_within_byte_budget() {
+        let cap = BailianOfflineBackend::new()
+            .max_recording_seconds()
+            .expect("离线后端应有硬时长上限");
+        // 上限对应的字节数必须留在 MAX_AUDIO_BYTES 之内（含 10% 余量），否则录满仍会上传失败。
+        assert!((cap as usize) * BYTES_PER_SEC <= MAX_AUDIO_BYTES);
+        // 落在文案宣称的"约 3-4 分钟"区间。
+        assert!((180..=240).contains(&cap), "cap = {cap}");
     }
 }

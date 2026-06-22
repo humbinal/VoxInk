@@ -17,6 +17,8 @@ pub enum IconStatus {
     Recording,
     /// 正在录制 + 实时转录（流式）——橙。
     RecordingRealtime,
+    /// 正在录制（仅录音：只存音频、不转写）——灰。
+    RecordingOnly,
     /// 正在转录（停止后离线转写中）——蓝。
     Transcribing,
 }
@@ -33,6 +35,8 @@ const WHITE: (u8, u8, u8) = (255, 255, 255);
 const MODE_OFFLINE_C: (u8, u8, u8) = (100, 153, 206);
 const MODE_STREAMING_C: (u8, u8, u8) = (189, 127, 148);
 const TRANSCRIBE_C: (u8, u8, u8) = (205, 166, 112);
+// 仅录音 = MODE_RECORDED hsl(0, 0, 62) 的 RGB 镜像（中性灰，表「只录不转」）。
+const MODE_RECORDED_C: (u8, u8, u8) = (158, 158, 158);
 
 /// 某状态的徽标颜色（Idle 无徽标）。
 fn badge_color(status: IconStatus) -> Option<(u8, u8, u8)> {
@@ -41,6 +45,7 @@ fn badge_color(status: IconStatus) -> Option<(u8, u8, u8)> {
         // 离线录制 → 离线开关蓝；实时录制 → 实时开关色；转录中 → 一致饱和度的橙。
         IconStatus::Recording => Some(MODE_OFFLINE_C),
         IconStatus::RecordingRealtime => Some(MODE_STREAMING_C),
+        IconStatus::RecordingOnly => Some(MODE_RECORDED_C),
         IconStatus::Transcribing => Some(TRANSCRIBE_C),
     }
 }

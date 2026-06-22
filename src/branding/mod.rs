@@ -11,8 +11,9 @@ pub fn icon_status(state: RecordingState, mode: TranscriptionMode) -> IconStatus
         RecordingState::Idle => IconStatus::Idle,
         RecordingState::Recording => match mode {
             TranscriptionMode::Streaming => IconStatus::RecordingRealtime,
-            // 仅录音与离线一样是普通录音态（无实时识别），用同一徽标。
-            TranscriptionMode::Offline | TranscriptionMode::RecordOnly => IconStatus::Recording,
+            TranscriptionMode::Offline => IconStatus::Recording,
+            // 仅录音用灰色徽标，与片段列表的灰圆点全局一致。
+            TranscriptionMode::RecordOnly => IconStatus::RecordingOnly,
         },
         RecordingState::Processing => IconStatus::Transcribing,
     }

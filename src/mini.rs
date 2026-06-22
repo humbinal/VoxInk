@@ -26,7 +26,7 @@ use crate::theme::{BRAND, STATUS_PROCESSING, STATUS_RECORDING};
 
 /// 迷你条窗口尺寸（px）。宽度运行期随内容自适应（见 [`desired_width`]），此为初始值。
 pub const MINI_W: f32 = 280.0;
-pub const MINI_H: f32 = 40.0;
+pub const MINI_H: f32 = 36.0;
 /// 窄波形竖条数量（也即 [`VoxInk::mini_snapshot`] 回传的电平尾巴长度）。
 pub const MINI_WAVE_BARS: usize = 16;
 /// 波形竖条最大/最小高度（px），贴合单行高度。
@@ -318,6 +318,9 @@ pub fn window_options() -> WindowOptions {
         show: true,
         kind: WindowKind::PopUp,
         is_movable: true,
+        // 单行状态条：高度固定、宽度由 tick_mini 程序化自适应。禁用用户拖边缩放
+        // （否则拖高留空白、拖宽与自适应对打、拖矮裁切内容）；不影响程序内 resize。
+        is_resizable: false,
         ..Default::default()
     }
 }
@@ -367,17 +370,62 @@ fn window_hwnd(window: &Window) -> Option<isize> {
 
 #[cfg(windows)]
 mod winimpl {
+    use std::cell::Cell;
     use std::ffi::c_void;
 
-    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, HWND_TOPMOST, SPI_GETWORKAREA, SW_HIDE, SWP_NOACTIVATE, SWP_NOSIZE,
-        SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, ShowWindow,
-        SystemParametersInfoW,
+        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, GetWindowRect, HTCAPTION, HTTOP, HTTOPLEFT,
+        HTTOPRIGHT, HWND_TOPMOST, SPI_GETWORKAREA, SW_HIDE, SWP_NOACTIVATE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowLongPtrW, SetWindowPos,
+        ShowWindow, SystemParametersInfoW, WM_NCHITTEST, WNDPROC,
     };
 
     fn hwnd(h: isize) -> HWND {
         HWND(h as *mut c_void)
+    }
+
+    thread_local! {
+        /// 迷你窗子类化状态：`(hwnd, 原 WNDPROC 指针)`。单一迷你窗，仅安装一次。
+        /// 全程在 gpui 主线程（win32 消息泵）上访问，thread_local 即够。
+        static SUBCLASS: Cell<(isize, isize)> = const { Cell::new((0, 0)) };
+    }
+
+    /// 子类化 WNDPROC：把 gpui 为无边框窗顶边合成的缩放命中（HTTOP/左上/右上）改写为
+    /// HTCAPTION——顶边由「缩放」变为「移动」。gpui 的 `handle_hit_test_msg` 只认 is_movable、
+    /// 忽略 is_resizable，且只给顶边合成缩放，故无法用 WindowOptions 关掉，只能这样拦截。
+    unsafe extern "system" fn subclass_proc(
+        hh: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        let (stored, orig_ptr) = SUBCLASS.with(|c| c.get());
+        let orig: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(orig_ptr) };
+        // 未安装 / 非本窗：交回系统默认，避免野指针调用。
+        if orig.is_none() || stored != hh.0 as isize {
+            return unsafe { DefWindowProcW(hh, msg, wparam, lparam) };
+        }
+        if msg == WM_NCHITTEST {
+            let res = unsafe { CallWindowProcW(orig, hh, msg, wparam, lparam) };
+            let code = res.0 as u32;
+            if code == HTTOP || code == HTTOPLEFT || code == HTTOPRIGHT {
+                return LRESULT(HTCAPTION as isize);
+            }
+            return res;
+        }
+        unsafe { CallWindowProcW(orig, hh, msg, wparam, lparam) }
+    }
+
+    /// 给迷你窗安装上述子类化（幂等：同一 HWND 只装一次）。
+    fn install_no_user_resize(h: isize) {
+        let (stored, orig) = SUBCLASS.with(|c| c.get());
+        if stored == h && orig != 0 {
+            return;
+        }
+        let proc_ptr = subclass_proc as *const () as isize;
+        let prev = unsafe { SetWindowLongPtrW(hwnd(h), GWLP_WNDPROC, proc_ptr) };
+        SUBCLASS.with(|c| c.set((h, prev)));
     }
 
     /// 当前窗口物理尺寸宽度（用于默认右上角定位）。
@@ -419,6 +467,8 @@ mod winimpl {
 
     /// 显示并置顶到给定/默认位置（仅移动不改尺寸——宽度由 gpui 逻辑 resize 管理）。
     pub fn show_at(h: isize, saved: Option<(i32, i32)>) {
+        // 关掉 gpui 无边框窗顶边的用户缩放（is_resizable 对其无效，见 subclass_proc）。
+        install_no_user_resize(h);
         let (x, y) = saved.unwrap_or_else(|| {
             let wa = work_area();
             (wa.right - window_width(h) - 40, wa.top + 100)

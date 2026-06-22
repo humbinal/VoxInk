@@ -71,9 +71,10 @@ cpal = "0.16"
 hound = "3"
 rubato = "0.16"
 ringbuf = "0.4"
-# 应用内音频回放（片段试听）。纯 Rust（基于 cpal），关闭自带解码器——
-# WAV 由 hound 解码后以 SamplesBuffer 喂入，仅用其播放/暂停/进度能力。
-rodio = { version = "0.20", default-features = false }
+# 应用内音频回放（片段试听）。纯 Rust（基于 cpal）。`wav` 特性走 hound（项目已依赖，
+# 零 C），启用后用 rodio 流式 Decoder 边读边解，内存恒定——避免大文件（10 小时录音
+# 上限约 1.15GB）全量解码进内存。
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
 
 # 品牌图标程序化绘制（纯 Rust 抗锯齿矢量光栅；无 C 依赖）。
 tiny-skia = "0.11"

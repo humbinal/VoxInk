@@ -83,6 +83,9 @@ segments.play:
 segments.pause:
   zh-CN: 暂停
   en: Pause
+segments.stop:
+  zh-CN: 停止
+  en: Stop
 segments.retranscribe:
   zh-CN: 重新转写
   en: Re-transcribe

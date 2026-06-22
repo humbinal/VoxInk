@@ -1,16 +1,20 @@
 //! 应用内 WAV 回放 —— 片段试听（IDEAS：片段播放改为应用内实现）。
 //!
-//! 基于 rodio（纯 Rust，底层走 cpal/WASAPI，无 C 依赖）。WAV 由 hound 解码为 i16 后
-//! 以 [`SamplesBuffer`] 喂入，rodio 自动完成与输出设备的重采样/声道映射。
+//! 基于 rodio（纯 Rust，底层走 cpal/WASAPI，无 C 依赖）。用 rodio 的流式 [`Decoder`]
+//! （`wav` 特性，底层 hound）**边读边解**：内存恒定，不随文件大小膨胀——避免大文件
+//! （录音上限 10 小时 ≈ 1.15GB）整段解码进内存。Decoder 自带各位深/浮点 WAV 容错，
+//! rodio 自动完成与输出设备的重采样/声道映射。
 //!
 //! ⚠️ [`OutputStream`] 是 `!Send` 且 **drop 即停**，必须随播放存活（存入视图字段）。
+//! 流式回放期间会持有该文件的只读句柄，drop [`Player`]（停播/切段/删除）即关闭。
 
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rodio::buffer::SamplesBuffer;
-use rodio::{OutputStream, OutputStreamHandle, Sink};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 
 /// 单文件 WAV 回放器：持有输出流 + Sink，提供暂停/继续/进度查询。
 pub struct Player {
@@ -24,16 +28,17 @@ pub struct Player {
 }
 
 impl Player {
-    /// 解码并立即开始播放一个 WAV 文件。
+    /// 打开并立即开始流式播放一个 WAV 文件（不整段解码进内存）。
     pub fn play_wav(path: &Path) -> Result<Self> {
         let (stream, handle) = OutputStream::try_default().context("打开音频输出设备失败")?;
         let sink = Sink::try_new(&handle).context("创建播放 Sink 失败")?;
 
-        let (samples, channels, sample_rate) = decode_wav_i16(path)?;
-        let frames = (samples.len() / channels.max(1) as usize) as f64;
-        let total = Duration::from_secs_f64(frames / sample_rate.max(1) as f64);
+        let file = BufReader::new(File::open(path).context("打开 WAV 文件失败")?);
+        let source = Decoder::new_wav(file).context("解码 WAV 失败")?;
+        // WAV 头直接给出总时长；缺失则按 0 处理（进度条隐藏）。
+        let total = source.total_duration().unwrap_or_default();
 
-        sink.append(SamplesBuffer::new(channels, sample_rate, samples));
+        sink.append(source);
         Ok(Self {
             _stream: stream,
             _handle: handle,
@@ -69,32 +74,4 @@ impl Player {
         }
         (self.sink.get_pos().as_secs_f32() / total).clamp(0.0, 1.0)
     }
-}
-
-/// 解码 WAV 为交错 i16 样本，返回 `(样本, 声道数, 采样率)`。
-///
-/// 本应用录音固定为 16-bit Int 单声道 16kHz；此处仍对 24/32-bit Int 与 Float 做容错，
-/// 以便用户导入/旧文件也能试听。
-fn decode_wav_i16(path: &Path) -> Result<(Vec<i16>, u16, u32)> {
-    let mut reader = hound::WavReader::open(path).context("打开 WAV 文件失败")?;
-    let spec = reader.spec();
-    let samples: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => match spec.bits_per_sample {
-            16 => reader
-                .samples::<i16>()
-                .collect::<std::result::Result<_, _>>()?,
-            bits => {
-                let shift = bits.saturating_sub(16);
-                reader
-                    .samples::<i32>()
-                    .map(|s| s.map(|v| (v >> shift) as i16))
-                    .collect::<std::result::Result<_, _>>()?
-            }
-        },
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .map(|s| s.map(|v| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16))
-            .collect::<std::result::Result<_, _>>()?,
-    };
-    Ok((samples, spec.channels, spec.sample_rate))
 }

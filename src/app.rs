@@ -2928,6 +2928,18 @@ impl VoxInk {
                                 )
                             })),
                     )
+                    // 停止按钮：仅在该段正在回放（播放或暂停）时出现，点击立即停播并释放
+                    // 输出设备 + 文件句柄（流式回放期间持有的资源）。
+                    .when(playing, |row| {
+                        row.child(
+                            Button::new(elem_id("seg-stop", &seg.id))
+                                .ghost()
+                                .small()
+                                .icon(Icon::empty().path("icons/stop.svg"))
+                                .tooltip(tr("segments.stop"))
+                                .on_click(cx.listener(|this, _, _, cx| this.stop_playback(cx))),
+                        )
+                    })
                     .child(
                         Button::new(elem_id("seg-re", &seg.id))
                             .ghost()

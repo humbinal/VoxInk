@@ -11,6 +11,8 @@ use gpui_component_assets::Assets as ComponentAssets;
 
 /// VoxInk 自有麦克风图标（录音按钮 / 迷你条指示用）。
 const MIC_SVG: &[u8] = include_bytes!("../assets/icons/mic.svg");
+/// VoxInk 自有停止图标（片段回放停止按钮用，内置图标集无 stop/square）。
+const STOP_SVG: &[u8] = include_bytes!("../assets/icons/stop.svg");
 /// 主界面标题栏品牌 logo（编译期由 build.rs 程序化渲染，与 exe/托盘/任务栏图标同源）。
 const LOGO_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/voxink_logo.png"));
 
@@ -21,6 +23,7 @@ impl AssetSource for VoxInkAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         match path {
             "icons/mic.svg" => Ok(Some(Cow::Borrowed(MIC_SVG))),
+            "icons/stop.svg" => Ok(Some(Cow::Borrowed(STOP_SVG))),
             "icons/logo.png" => Ok(Some(Cow::Borrowed(LOGO_PNG))),
             _ => ComponentAssets.load(path),
         }

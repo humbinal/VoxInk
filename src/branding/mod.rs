@@ -11,7 +11,8 @@ pub fn icon_status(state: RecordingState, mode: TranscriptionMode) -> IconStatus
         RecordingState::Idle => IconStatus::Idle,
         RecordingState::Recording => match mode {
             TranscriptionMode::Streaming => IconStatus::RecordingRealtime,
-            TranscriptionMode::Offline => IconStatus::Recording,
+            // 仅录音与离线一样是普通录音态（无实时识别），用同一徽标。
+            TranscriptionMode::Offline | TranscriptionMode::RecordOnly => IconStatus::Recording,
         },
         RecordingState::Processing => IconStatus::Transcribing,
     }

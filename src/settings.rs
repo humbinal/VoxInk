@@ -1641,33 +1641,31 @@ impl SettingsView {
         mode: TranscriptionMode,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let is_streaming = mode == TranscriptionMode::Streaming;
+        let seg = |id: &'static str,
+                   key: &'static str,
+                   val: TranscriptionMode,
+                   cx: &mut Context<Self>| {
+            let active = mode == val;
+            Button::new(id)
+                .when(active, |b| b.primary())
+                .when(!active, |b| b.outline())
+                .small()
+                .label(tr(key))
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    this.update_config(cx, |c| c.asr.default_mode = val);
+                    cx.notify();
+                }))
+        };
         h_flex()
             .gap_2()
-            .child(
-                Button::new("mode-s")
-                    .when(is_streaming, |b| b.primary())
-                    .when(!is_streaming, |b| b.outline())
-                    .small()
-                    .label(tr("mode.streaming"))
-                    .on_click(cx.listener(|this, _, _w, cx| {
-                        this.update_config(cx, |c| {
-                            c.asr.default_mode = TranscriptionMode::Streaming
-                        });
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("mode-o")
-                    .when(!is_streaming, |b| b.primary())
-                    .when(is_streaming, |b| b.outline())
-                    .small()
-                    .label(tr("mode.offline"))
-                    .on_click(cx.listener(|this, _, _w, cx| {
-                        this.update_config(cx, |c| c.asr.default_mode = TranscriptionMode::Offline);
-                        cx.notify();
-                    })),
-            )
+            .child(seg("mode-s", "mode.streaming", TranscriptionMode::Streaming, cx))
+            .child(seg("mode-o", "mode.offline", TranscriptionMode::Offline, cx))
+            .child(seg(
+                "mode-r",
+                "mode.recordonly",
+                TranscriptionMode::RecordOnly,
+                cx,
+            ))
     }
 
     fn theme_choice(&self, theme: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {

@@ -29,7 +29,8 @@ use gpui_component::{
 };
 
 use crate::theme::{
-    brand_tint, BRAND, DANGER, MODE_OFFLINE, MODE_STREAMING, STATUS_IDLE, STATUS_PROCESSING,
+    brand_tint, BRAND, DANGER, MODE_OFFLINE, MODE_RECORDED, MODE_STREAMING, STATUS_IDLE,
+    STATUS_PROCESSING,
     STATUS_RECORDING,
 };
 
@@ -523,15 +524,18 @@ impl VoxInk {
     /// 本次录音的实际自动停止上限（秒）：取用户配置与**当前模式所选后端**能力上限的较小值。
     /// 流式/自建等无后端侧上限的后端用满用户配置（最高 10 小时）；离线同步等受请求体限制的
     /// 后端则提前停止，避免录完才在上传阶段失败。
-    fn effective_max_recording_seconds(&self, cx: &Context<Self>, streaming: bool) -> u32 {
+    fn effective_max_recording_seconds(&self, cx: &Context<Self>, mode: TranscriptionMode) -> u32 {
         let user_max = self.max_recording_seconds(cx);
-        let backend_id = cx.try_global::<GlobalConfig>().map(|g| {
-            if streaming {
-                g.0.asr.streaming_backend.clone()
-            } else {
-                g.0.asr.offline_backend.clone()
+        // 仅录音不经任何后端，故不受后端时长能力钳制，用满用户上限。
+        let backend_id = match mode {
+            TranscriptionMode::RecordOnly => return user_max,
+            TranscriptionMode::Streaming => {
+                cx.try_global::<GlobalConfig>().map(|g| g.0.asr.streaming_backend.clone())
             }
-        });
+            TranscriptionMode::Offline => {
+                cx.try_global::<GlobalConfig>().map(|g| g.0.asr.offline_backend.clone())
+            }
+        };
         let backend_cap = backend_id
             .and_then(|id| BackendRegistry::with_builtins().get(&id))
             .and_then(|b| b.max_recording_seconds());
@@ -858,21 +862,28 @@ impl VoxInk {
     }
 
     /// 开始录音：构建 Recorder，进入 Recording 状态，启动计时器。
-    fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// `record_only` 为真表示「仅录音」模式（片段标 `"recorded"`、停止后不转写、不受离线后端时长钳制）。
+    fn start_recording(&mut self, record_only: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (wav_path, persisted) = self.prepare_recording_path(cx);
         let level: LevelMeter = Arc::new(AtomicU32::new(0));
         let device = self.configured_input_device(cx);
         match Recorder::start(wav_path.clone(), level.clone(), device) {
             Ok(recorder) => {
-                self.begin_active_recording(wav_path, persisted, "offline");
+                let tag = if record_only { "recorded" } else { "offline" };
+                self.begin_active_recording(wav_path, persisted, tag);
                 self.recorder = Some(recorder);
                 self.level_meter = level;
                 self.levels.clear();
                 self.state.recording_state = RecordingState::Recording;
                 self.state.recording_duration_secs = 0;
-                tracing::info!("开始录音");
+                tracing::info!(record_only, "开始录音");
                 cx.notify();
-                let max = self.effective_max_recording_seconds(cx, false);
+                let mode = if record_only {
+                    TranscriptionMode::RecordOnly
+                } else {
+                    TranscriptionMode::Offline
+                };
+                let max = self.effective_max_recording_seconds(cx, mode);
                 self.spawn_timer(window, cx, max);
                 self.spawn_level_poll(window, cx);
             }
@@ -907,9 +918,19 @@ impl VoxInk {
                         cx,
                     );
                 }
-                // 录音完成后自动触发离线转写（任务 4.4）。
                 let duration_secs = outcome.duration.as_secs() as u32;
-                self.start_transcription(window, cx, outcome.path, duration_secs);
+                if self.state.transcription_mode == TranscriptionMode::RecordOnly {
+                    // 仅录音：直接落库（文本留空），不转写；累加记录时长后回到空闲。
+                    self.state.recording_state = RecordingState::Idle;
+                    self.state.recording_duration_secs = 0;
+                    self.persist_after_recording(duration_secs, cx);
+                    self.finalize_segment("", duration_secs, cx);
+                    notify(window, tr("record.saved_only"), cx);
+                    cx.notify();
+                } else {
+                    // 离线：录音完成后自动触发离线转写（任务 4.4）。
+                    self.start_transcription(window, cx, outcome.path, duration_secs);
+                }
             }
             Err(e) => {
                 tracing::error!("停止录音失败: {e}");
@@ -1048,7 +1069,7 @@ impl VoxInk {
             let _ = done_tx.send(result);
         });
 
-        let max = self.effective_max_recording_seconds(cx, true);
+        let max = self.effective_max_recording_seconds(cx, TranscriptionMode::Streaming);
         self.spawn_timer(window, cx, max);
         self.spawn_level_poll(window, cx);
 
@@ -1598,12 +1619,12 @@ impl VoxInk {
         }
     }
 
-    /// 按当前模式开始：实时 → 流式；离线 → 录 WAV。
+    /// 按当前模式开始：实时 → 流式；离线/仅录音 → 录 WAV（仅录音停止后不转写）。
     fn start_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.transcription_mode == TranscriptionMode::Streaming {
-            self.start_streaming(window, cx);
-        } else {
-            self.start_recording(window, cx);
+        match self.state.transcription_mode {
+            TranscriptionMode::Streaming => self.start_streaming(window, cx),
+            TranscriptionMode::Offline => self.start_recording(false, window, cx),
+            TranscriptionMode::RecordOnly => self.start_recording(true, window, cx),
         }
     }
 
@@ -1633,11 +1654,12 @@ impl VoxInk {
         cx.notify();
     }
 
-    /// 在实时/离线之间切换转录模式（应用内快捷键触发）。
+    /// 循环切换转录模式（应用内快捷键触发）：实时 → 离线 → 仅录音 → 实时。
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
         let next = match self.state.transcription_mode {
             TranscriptionMode::Streaming => TranscriptionMode::Offline,
-            TranscriptionMode::Offline => TranscriptionMode::Streaming,
+            TranscriptionMode::Offline => TranscriptionMode::RecordOnly,
+            TranscriptionMode::RecordOnly => TranscriptionMode::Streaming,
         };
         self.on_select_mode(next, cx);
     }
@@ -2119,14 +2141,14 @@ impl VoxInk {
                 ),
             };
 
-        // 行高与「模式切换」开关对齐（≈20px），与单行工具条其它控件同处一行。
+        // 行高与同一工具条的麦克风触发器、模式选择器统一为 28px。
         let mut button = h_flex()
             .id("record-button")
             .items_center()
             .justify_center()
             .gap_1p5()
             .w(px(104.))
-            .h(px(24.))
+            .h(px(28.))
             .rounded(px(6.))
             .bg(bg)
             .text_color(white())
@@ -2203,53 +2225,73 @@ impl VoxInk {
             })
     }
 
-    /// 转录模式切换（离线 ⟷ 实时）。自绘开关：两态各用一种**明亮且对比**的轨道色
-    /// （离线=蓝 / 实时=琥珀）区分模式，无启用/禁用语义；当前选中模式的**文字用品牌主色**高亮。
-    /// 去掉前缀文案、改用 hover 提示点明用途。录音中禁用但仍显示当前模式。
+    /// 转录模式选择（实时 / 离线 / 仅录音）。三段分段选择器：当前段以背景小药丸 + 品牌主色
+    /// 文字高亮，其余浅色；hover 提示点明用途。录音中整体禁用但仍显示当前模式。
     fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_streaming = self.state.transcription_mode == TranscriptionMode::Streaming;
+        let current = self.state.transcription_mode;
         let disabled = self.state.recording_state != RecordingState::Idle;
         let muted = cx.theme().muted_foreground;
-        // 侧标签：当前项用品牌主色 + 中等字重；非当前用浅色。
-        let side_label = |text: String, on: bool| {
-            div()
+        let foreground = cx.theme().foreground;
+        let active_bg = cx.theme().background;
+
+        // 单个分段：当前态加背景药丸 + 品牌字；非当前可点、hover 提色。
+        let seg = |mode: TranscriptionMode,
+                   id: &'static str,
+                   label: String,
+                   cx: &mut Context<Self>| {
+            let on = current == mode;
+            let mut s = div()
+                .id(id)
+                .px_2()
+                .py(px(2.))
+                .rounded(px(5.))
                 .text_sm()
                 .text_color(if on { BRAND } else { muted })
-                .when(on, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                .child(text)
+                .when(on, |d| {
+                    d.font_weight(gpui::FontWeight::MEDIUM)
+                        .bg(active_bg)
+                        .shadow_sm()
+                })
+                .child(label);
+            if !disabled {
+                s = s.cursor_pointer().on_click(
+                    cx.listener(move |this, _, _w, cx| this.on_select_mode(mode, cx)),
+                );
+                if !on {
+                    s = s.hover(move |x| x.text_color(foreground));
+                }
+            }
+            s
         };
 
-        // 轨道 40×22，滑块 16，内边距 3 → 左/右端位置。
-        let track_color = if is_streaming {
-            MODE_STREAMING
-        } else {
-            MODE_OFFLINE
-        };
-        let mut sw = div()
-            .id("mode-switch")
-            .w(px(40.))
-            .h(px(20.))
+        let track = h_flex()
             .flex_shrink_0()
-            .rounded_full()
-            .bg(track_color)
-            .relative()
-            .child(
-                div()
-                    .absolute()
-                    .top(px(3.))
-                    .left(px(if is_streaming { 22. } else { 4. }))
-                    .size(px(14.))
-                    .rounded_full()
-                    .bg(white())
-                    .shadow_sm(),
-            );
-        if disabled {
-            sw = sw.opacity(0.5);
-        } else {
-            sw = sw
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _w, cx| this.toggle_mode(cx)));
-        }
+            .items_center()
+            // 高度与同一工具条的麦克风触发器、录音按钮统一为 28px。
+            .h(px(28.))
+            .gap(px(2.))
+            .px(px(2.))
+            .rounded(px(7.))
+            .bg(cx.theme().muted)
+            .when(disabled, |d| d.opacity(0.5))
+            .child(seg(
+                TranscriptionMode::Streaming,
+                "mode-seg-s",
+                tr("mode.streaming"),
+                cx,
+            ))
+            .child(seg(
+                TranscriptionMode::Offline,
+                "mode-seg-o",
+                tr("mode.offline"),
+                cx,
+            ))
+            .child(seg(
+                TranscriptionMode::RecordOnly,
+                "mode-seg-r",
+                tr("mode.recordonly"),
+                cx,
+            ));
 
         h_flex()
             .id("mode-toggle")
@@ -2261,9 +2303,7 @@ impl VoxInk {
                 this.toolbar_tip = hovered.then_some(ToolbarTip::Mode);
                 cx.notify();
             }))
-            .child(side_label(tr("mode.offline"), !is_streaming))
-            .child(sw)
-            .child(side_label(tr("mode.streaming"), is_streaming))
+            .child(track)
             .when(self.toolbar_tip == Some(ToolbarTip::Mode), |this| {
                 this.child(self.toolbar_tooltip(tr("mode.tooltip"), cx))
             })
@@ -3359,6 +3399,7 @@ fn fmt_size(bytes: u64) -> String {
 fn mode_dot(mode: &str) -> Hsla {
     match mode {
         "streaming" => MODE_STREAMING,
+        "recorded" => MODE_RECORDED,
         _ => MODE_OFFLINE,
     }
 }

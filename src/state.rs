@@ -27,6 +27,8 @@ pub enum TranscriptionMode {
     Streaming,
     /// 离线整段：录音完成后一次性发送完整音频转写
     Offline,
+    /// 仅录音：只把音频存为片段、不转写，待网络/服务可用后从片段管理手动转写
+    RecordOnly,
 }
 
 /// 应用全局状态（§2.1）。

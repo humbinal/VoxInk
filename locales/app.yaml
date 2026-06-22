@@ -20,14 +20,20 @@ mic.tooltip:
   zh-CN: 选择录音使用的麦克风设备
   en: Choose the microphone used for recording
 mode.tooltip:
-  zh-CN: 切换转录模式：离线（录完整段后识别）/ 实时（边说边出字）
-  en: Switch mode — Offline (transcribe after recording) / Realtime (live as you speak)
+  zh-CN: 切换模式：实时（边说边出字）/ 离线（录完整段后识别）/ 仅录音（只存音频，稍后在片段管理转写）
+  en: Switch mode — Realtime (live as you speak) / Offline (transcribe after recording) / Record-only (save audio, transcribe later)
 mode.streaming:
   zh-CN: 实时
   en: Realtime
 mode.offline:
   zh-CN: 离线
   en: Offline
+mode.recordonly:
+  zh-CN: 仅录音
+  en: Record-only
+record.saved_only:
+  zh-CN: 已保存录音，可稍后在片段管理中转写
+  en: Recording saved — transcribe later from segments
 status.idle:
   zh-CN: 就绪
   en: Ready

@@ -68,6 +68,7 @@ impl Render for MiniBar {
         let mode_text = match snap.mode {
             TranscriptionMode::Streaming => tr("mode.streaming"),
             TranscriptionMode::Offline => tr("mode.offline"),
+            TranscriptionMode::RecordOnly => tr("mode.recordonly"),
         };
         let duration = format!("{:02}:{:02}", snap.duration_secs / 60, snap.duration_secs % 60);
         let chars_label = format!("{} {}", snap.chars, tr("mini.chars_suffix"));
@@ -285,6 +286,7 @@ pub fn desired_width(snap: &MiniSnapshot) -> f32 {
     let mode = match snap.mode {
         TranscriptionMode::Streaming => tr("mode.streaming"),
         TranscriptionMode::Offline => tr("mode.offline"),
+        TranscriptionMode::RecordOnly => tr("mode.recordonly"),
     };
     let duration = format!("{:02}:{:02}", snap.duration_secs / 60, snap.duration_secs % 60);
     let chars_label = format!("{} {}", snap.chars, tr("mini.chars_suffix"));

@@ -43,6 +43,8 @@ pub const DANGER: Hsla = hsl(5.0, 74.0, 60.0);
 /// 离线：柔雾蓝；实时：豆沙粉。两色均为低饱和度，在明暗主题下均清晰柔和。
 pub const MODE_OFFLINE: Hsla = hsl(198.0, 32.0, 62.0);
 pub const MODE_STREAMING: Hsla = hsl(340.0, 32.0, 62.0);
+/// 仅录音 / 未转写片段：中性灰（表「待转写」，与两种已转写模式色区分）。
+pub const MODE_RECORDED: Hsla = hsl(0.0, 0.0, 62.0);
 
 /// 主色的浅色填充（用于「新建」按钮底、当前记录项高亮）——浅色主题。
 pub const BRAND_TINT_LIGHT: Hsla = hsl(172.0, 46.0, 93.0);

@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use directories::BaseDirs;
 use rusqlite::{Connection, params};
 use serde::Serialize;
@@ -152,7 +152,7 @@ impl HistoryDb {
     pub fn create_record(&self) -> Result<Record> {
         let now = Utc::now().to_rfc3339();
         let rec = Record {
-            id: Uuid::new_v4().to_string(),
+            id: time_based_id(),
             title: NEW_RECORD_TITLE.to_string(),
             text: String::new(),
             duration_secs: 0,
@@ -294,7 +294,7 @@ impl HistoryDb {
         byte_size: u64,
     ) -> Result<Segment> {
         let seg = Segment {
-            id: Uuid::new_v4().to_string(),
+            id: time_based_id(),
             record_id: record_id.to_string(),
             file_path: file_path.to_string_lossy().to_string(),
             mode: mode.to_string(),
@@ -433,6 +433,14 @@ fn map_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
 /// 8 位短随机串（取 UUID v4 前 8 个十六进制位），用于录音文件名去重。
 pub fn short_uuid() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
+/// 基于时间的可读 ID：`{本地时戳}_{8位随机}`，如 `20260622-143000_a1b2c3d4`。
+///
+/// 用作 records 主键兼音频目录名（`{音频根}/{record_id}/`），比 UUID 易读。
+/// 时戳仅 1 秒精度，靠 8 位随机后缀避免同秒创建的主键碰撞。
+pub fn time_based_id() -> String {
+    format!("{}_{}", Local::now().format("%Y%m%d-%H%M%S"), short_uuid())
 }
 
 fn map_segment(row: &rusqlite::Row) -> rusqlite::Result<Segment> {

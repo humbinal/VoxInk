@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::asr::config::AsrConfig;
 use crate::asr::error::AsrError;
-use crate::asr::traits::{AsrBackend, StreamingResult};
+use crate::asr::traits::{AsrBackend, OfflineAudio, StreamingResult};
 use crate::asr::websocket::connect;
 
 const MODEL: &str = "qwen3-asr-flash-realtime";
@@ -109,7 +109,7 @@ impl AsrBackend for BailianStreamingBackend {
     async fn transcribe_offline(
         &self,
         _config: &AsrConfig,
-        _audio_data: Vec<u8>,
+        _audio: OfflineAudio,
     ) -> Result<String, AsrError> {
         Err(AsrError::InvalidConfig(
             "实时后端不支持离线整段识别".to_string(),

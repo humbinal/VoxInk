@@ -98,6 +98,12 @@ segments.retranscribe:
 segments.delete:
   zh-CN: 删除片段
   en: Delete segment
+segments.import:
+  zh-CN: 导入音频
+  en: Import audio
+segments.import_tip:
+  zh-CN: 导入外部 WAV / MP3 文件为本记录的一段（不自动转写）
+  en: Import an external WAV / MP3 file as a segment (no auto-transcribe)
 
 # 编辑区 / 底栏
 editor.placeholder:

@@ -6,6 +6,8 @@
 //! 而注册表需要 `Arc<dyn AsrBackend>`（trait 对象），故使用 `async_trait` 宏装箱
 //! 返回的 future（§2.2 已声明此为实现细节，以当前工具链为准）。
 
+use std::path::Path;
+
 use async_trait::async_trait;
 
 use super::config::AsrConfig;
@@ -53,13 +55,59 @@ pub trait AsrBackend: Send + Sync + 'static {
     ) -> Result<(), AsrError>;
 
     /// 离线整段识别。
-    /// - `audio_data`：完整 WAV 文件字节。
+    /// - `audio`：完整音频文件字节 + 容器格式（决定上传时的 MIME/扩展名）。
     /// - 返回完整转写文本。
     async fn transcribe_offline(
         &self,
         config: &AsrConfig,
-        audio_data: Vec<u8>,
+        audio: OfflineAudio,
     ) -> Result<String, AsrError>;
+}
+
+/// 离线转写的音频输入（M14）：原始文件字节 + 容器格式。
+/// 录音产物恒为 [`AudioFormat::Wav`]；外部导入可为 Wav/Mp3（§4.2.3）。
+pub struct OfflineAudio {
+    pub data: Vec<u8>,
+    pub format: AudioFormat,
+}
+
+/// 支持离线转写/回放的音频容器格式（M14）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioFormat {
+    Wav,
+    Mp3,
+}
+
+impl AudioFormat {
+    /// 上传时使用的 MIME 类型。
+    pub fn mime(self) -> &'static str {
+        match self {
+            AudioFormat::Wav => "audio/wav",
+            AudioFormat::Mp3 => "audio/mpeg",
+        }
+    }
+
+    /// 小写文件扩展名（不含点）。
+    pub fn extension(self) -> &'static str {
+        match self {
+            AudioFormat::Wav => "wav",
+            AudioFormat::Mp3 => "mp3",
+        }
+    }
+
+    /// 由文件扩展名推断格式（大小写不敏感）；不支持的扩展名返回 `None`。
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("wav") => Some(AudioFormat::Wav),
+            Some("mp3") => Some(AudioFormat::Mp3),
+            _ => None,
+        }
+    }
 }
 
 /// 流式识别的单次增量结果（§2.2）。
@@ -74,4 +122,36 @@ pub struct StreamingResult {
     pub is_final: bool,
     /// 结果时间戳。
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_format_from_path_is_case_insensitive() {
+        assert_eq!(
+            AudioFormat::from_path(Path::new("a.wav")),
+            Some(AudioFormat::Wav)
+        );
+        assert_eq!(
+            AudioFormat::from_path(Path::new("REC.WAV")),
+            Some(AudioFormat::Wav)
+        );
+        assert_eq!(
+            AudioFormat::from_path(Path::new("b.Mp3")),
+            Some(AudioFormat::Mp3)
+        );
+        // 不支持的扩展名 / 无扩展名 → None。
+        assert_eq!(AudioFormat::from_path(Path::new("c.flac")), None);
+        assert_eq!(AudioFormat::from_path(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn audio_format_mime_and_extension() {
+        assert_eq!(AudioFormat::Wav.mime(), "audio/wav");
+        assert_eq!(AudioFormat::Mp3.mime(), "audio/mpeg");
+        assert_eq!(AudioFormat::Wav.extension(), "wav");
+        assert_eq!(AudioFormat::Mp3.extension(), "mp3");
+    }
 }

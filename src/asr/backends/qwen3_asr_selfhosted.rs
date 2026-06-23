@@ -28,7 +28,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::asr::config::AsrConfig;
 use crate::asr::error::AsrError;
-use crate::asr::traits::{AsrBackend, StreamingResult};
+use crate::asr::traits::{AsrBackend, OfflineAudio, StreamingResult};
 use crate::asr::websocket::connect_plain;
 
 const MAX_RETRIES: usize = 3;
@@ -128,17 +128,18 @@ impl AsrBackend for Qwen3AsrSelfhostedBackend {
     async fn transcribe_offline(
         &self,
         config: &AsrConfig,
-        audio_data: Vec<u8>,
+        audio: OfflineAudio,
     ) -> Result<String, AsrError> {
-        if audio_data.is_empty() {
+        let OfflineAudio { data, format } = audio;
+        if data.is_empty() {
             return Err(AsrError::EmptyAudio);
         }
         let base = base_url(config)?;
         let url = format!("{base}/v1/audio/transcriptions");
 
-        let part = multipart::Part::bytes(audio_data)
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
+        let part = multipart::Part::bytes(data)
+            .file_name(format!("audio.{}", format.extension()))
+            .mime_str(format.mime())
             .map_err(|e| AsrError::NetworkError(format!("构造上传表单失败: {e}")))?;
         let mut form = multipart::Form::new()
             .part("file", part)

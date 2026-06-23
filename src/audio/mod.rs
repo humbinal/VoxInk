@@ -9,6 +9,7 @@
 pub mod buffer;
 pub mod capture;
 pub mod chunk_sender;
+pub mod import;
 pub mod player;
 pub mod resample;
 pub mod writer;
@@ -105,6 +106,9 @@ pub enum AudioError {
 
     #[error("WAV 写入失败: {0}")]
     Wav(String),
+
+    #[error("音频解码失败: {0}")]
+    Decode(String),
 
     #[error("录音线程异常退出")]
     WorkerPanicked,

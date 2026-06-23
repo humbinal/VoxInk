@@ -15,8 +15,8 @@ use chrono::{DateTime, Local};
 use gpui::{
     deferred, div, ease_in_out, img, prelude::*, px, relative, size, white, Animation, AnimationExt, AnyElement,
     App, ClickEvent, Context, Entity, Focusable, Hsla, IntoElement, KeyDownEvent,
-    ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Subscription, Window,
-    WindowControlArea, WindowHandle,
+    ParentElement, PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Styled,
+    Subscription, Window, WindowControlArea, WindowHandle,
 };
 use gpui_component::{
     button::{Button, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState, RopeExt}, notification::Notification, scroll::{Scrollbar, ScrollbarShow}, v_flex, ActiveTheme,
@@ -34,7 +34,7 @@ use crate::theme::{
     STATUS_RECORDING,
 };
 
-use crate::asr::traits::StreamingResult;
+use crate::asr::traits::{AudioFormat, OfflineAudio, StreamingResult};
 use crate::asr::{AsrConfig, AsrError, BackendRegistry};
 use crate::audio::{
     list_input_devices, load_level, AudioError, LevelMeter, Player, Recorder, StreamingCapture,
@@ -716,7 +716,14 @@ impl VoxInk {
             notify(window, "音频文件不存在（可能已被清理）", cx);
             return;
         }
-        match Player::play_wav(&p) {
+        // 解码器拿不到总时长（如 mp3）时用片段已知时长作进度条回退。
+        let fallback = self
+            .segments
+            .iter()
+            .find(|s| s.id == seg_id)
+            .map(|s| s.duration_secs)
+            .unwrap_or(0);
+        match Player::play(&p, fallback) {
             Ok(player) => {
                 self.playback = Some(Playback { seg_id, player });
                 self.spawn_playback_poll(cx);
@@ -745,8 +752,9 @@ impl VoxInk {
         let next = idx.and_then(|i| self.segments.get(i + 1));
         match next {
             Some(seg) => {
-                let (seg_id, path) = (seg.id.clone(), seg.file_path.clone());
-                match Player::play_wav(&PathBuf::from(&path)) {
+                let (seg_id, path, fallback) =
+                    (seg.id.clone(), seg.file_path.clone(), seg.duration_secs);
+                match Player::play(&PathBuf::from(&path), fallback) {
                     Ok(player) => self.playback = Some(Playback { seg_id, player }),
                     Err(e) => {
                         tracing::error!("自动播放下一段失败: {e:#}");
@@ -870,6 +878,96 @@ impl VoxInk {
             });
         })
         .detach();
+    }
+
+    /// 导入外部音频文件（wav/mp3）为当前记录的一段（M14，§4.2.3）。
+    /// 弹系统文件对话框选文件；选定后走 [`Self::import_audio_from`]。复制保留原格式、不自动转写。
+    fn import_audio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_idle() {
+            notify(window, "录制中，暂不能导入音频", cx);
+            return;
+        }
+        // 确保有当前记录可挂（无则先新建）。
+        if self.current_record_id.is_empty() {
+            self.new_record(window, cx);
+            if self.current_record_id.is_empty() {
+                return;
+            }
+        }
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("导入".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            // 对话框取消/出错 → 无路径，静默返回。
+            let src = match rx.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(src) = src else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.import_audio_from(src, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 把所选音频文件复制进当前记录的归档目录并落 `segments` 行（`mode="imported"`，文本留空待手动转写）。
+    fn import_audio_from(&mut self, src: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(format) = AudioFormat::from_path(&src) else {
+            notify(window, "仅支持导入 WAV / MP3 文件", cx);
+            return;
+        };
+        if !src.exists() {
+            notify(window, "所选文件不存在", cx);
+            return;
+        }
+        let Some(root) = cx
+            .try_global::<GlobalConfig>()
+            .and_then(|g| g.0.storage.audio_root().ok())
+        else {
+            notify(window, "导入失败：无法定位录音目录", cx);
+            return;
+        };
+        let dir = root.join(&self.current_record_id);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::error!("创建导入目录失败: {e:#}");
+            notify(window, "导入失败：无法创建目录", cx);
+            return;
+        }
+        // 复用录音归档命名：{时戳}_{短id}.{原扩展名}。
+        let dst = dir.join(format!(
+            "{}_{}.{}",
+            Local::now().format("%Y%m%d-%H%M%S"),
+            short_id(),
+            format.extension()
+        ));
+        if let Err(e) = std::fs::copy(&src, &dst) {
+            tracing::error!("复制导入文件失败: {e:#}");
+            notify(window, "导入失败：无法复制文件", cx);
+            return;
+        }
+        let size = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
+        let duration = crate::audio::import::audio_duration_secs(&dst).unwrap_or_else(|e| {
+            tracing::warn!("导入音频时长探测失败（按 0 处理）: {e:#}");
+            0
+        });
+        if let Some(g) = cx.try_global::<GlobalHistory>()
+            && let Err(e) = g
+                .0
+                .add_segment(&self.current_record_id, &dst, "imported", "", duration, size)
+        {
+            tracing::error!("导入片段落库失败: {e:#}");
+            let _ = std::fs::remove_file(&dst); // 落库失败则回滚已复制文件，避免孤儿
+            notify(window, "导入失败：写入数据库错误", cx);
+            return;
+        }
+        // 展开片段面板让用户看到新导入项，并提示可手动转写。
+        self.show_segments = true;
+        self.refresh_segments(cx);
+        notify(window, "已导入音频，可点片段的「重新转写」生成文本", cx);
     }
 
     /// 开始录音：构建 Recorder，进入 Recording 状态，启动计时器。
@@ -2831,20 +2929,31 @@ impl VoxInk {
             .bg(cx.theme().sidebar)
             .child(
                 h_flex()
-                    // 标题不可压缩，始终占满一行高度。
+                    // 标题行：左侧标题，右侧「导入音频」按钮。不可压缩，始终占满一行高度。
                     .flex_shrink_0()
                     .w_full()
                     .items_center()
+                    .justify_between()
                     .px_4()
                     .py_2()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{} ({})",
-                        tr("segments.title"),
-                        self.segments.len()
-                    )),
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{} ({})", tr("segments.title"), self.segments.len())),
+                    )
+                    .child(
+                        Button::new("seg-import")
+                            .ghost()
+                            .small()
+                            .label(tr("segments.import"))
+                            .tooltip(tr("segments.import_tip"))
+                            .disabled(!self.is_idle())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.import_audio(window, cx)),
+                            ),
+                    ),
             );
 
         if self.segments.is_empty() {
@@ -3143,7 +3252,12 @@ pub(crate) fn cleanup_audio_on_startup(
                 if let Ok(files) = std::fs::read_dir(dir.path()) {
                     for f in files.flatten() {
                         let p = f.path();
-                        if p.extension().is_some_and(|e| e == "wav") && !known.contains(&p) {
+                        // 归档目录内的音频：录音 .wav + 导入 .mp3（M14）。
+                        let is_audio = p
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "wav" | "mp3"));
+                        if is_audio && !known.contains(&p) {
                             let _ = std::fs::remove_file(&p);
                             removed += 1;
                         }
@@ -3193,17 +3307,21 @@ pub(crate) fn export_history_json(cx: &App) -> Result<PathBuf> {
 /// 后端由用户在设置中显式选择（`offline_backend`）；不再按音频大小自动切换。
 async fn run_offline_transcription(
     config: AsrConfig,
-    wav_path: PathBuf,
+    audio_path: PathBuf,
 ) -> Result<String, AsrError> {
-    let audio = tokio::fs::read(&wav_path).await?;
+    let data = tokio::fs::read(&audio_path).await?;
+    // 录音产物恒为 wav；导入文件按扩展名定格式，未知扩展名兜底按 wav。
+    let format = AudioFormat::from_path(&audio_path).unwrap_or(AudioFormat::Wav);
     let backend_id = config.backend_id.clone();
-    tracing::info!(%backend_id, bytes = audio.len(), "离线转写后端");
+    tracing::info!(%backend_id, bytes = data.len(), ?format, "离线转写后端");
 
     let registry = BackendRegistry::with_builtins();
     let backend = registry
         .get(&backend_id)
         .ok_or_else(|| AsrError::InvalidConfig(format!("未找到离线后端: {backend_id}")))?;
-    backend.transcribe_offline(&config, audio).await
+    backend
+        .transcribe_offline(&config, OfflineAudio { data, format })
+        .await
 }
 
 /// 某后端在 api_key 留空时回退的环境变量名（"后端 → 环境变量" 的**单一映射**，

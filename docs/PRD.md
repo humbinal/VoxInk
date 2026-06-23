@@ -223,13 +223,28 @@ pub trait AsrBackend: Send + Sync + 'static {
     ) -> Result<(), AsrError>;
 
     /// 离线整段识别。
-    /// - audio_data：完整 WAV 文件字节。
+    /// - audio：完整音频文件字节 + 容器格式（决定上传时的 MIME/扩展名）。
     /// - 返回完整转写文本。
     async fn transcribe_offline(
         &self,
         config: &AsrConfig,
-        audio_data: Vec<u8>,
+        audio: OfflineAudio,
     ) -> Result<String, AsrError>;
+}
+
+/// 离线转写的音频输入（M14）：原始文件字节 + 容器格式。
+/// 录音产物恒为 Wav；外部导入可为 Wav/Mp3（§4.2.3）。格式决定各后端上传时的
+/// MIME 与文件扩展名（base64 data-url / multipart 文件名 / OSS 对象后缀）。
+pub struct OfflineAudio {
+    pub data: Vec<u8>,
+    pub format: AudioFormat,
+}
+
+/// 支持离线转写的音频容器格式（M14）。`mime()`/`extension()` 为派生细节，非契约。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioFormat {
+    Wav,
+    Mp3,
 }
 
 /// 流式识别的单次增量结果。
@@ -444,8 +459,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS records_fts
 CREATE TABLE IF NOT EXISTS segments (
     id            TEXT PRIMARY KEY,
     record_id     TEXT NOT NULL,            -- FK → records.id
-    file_path     TEXT NOT NULL,            -- 音频文件绝对路径
-    mode          TEXT NOT NULL,            -- "streaming" | "offline"
+    file_path     TEXT NOT NULL,            -- 音频文件绝对路径（.wav 或 .mp3）
+    mode          TEXT NOT NULL,            -- "streaming" | "offline" | "recorded" | "imported"
     text          TEXT NOT NULL DEFAULT '', -- 该段转写（音频↔文字对照/重转写）
     duration_secs INTEGER NOT NULL DEFAULT 0,
     byte_size     INTEGER NOT NULL DEFAULT 0,
@@ -464,6 +479,12 @@ CREATE INDEX IF NOT EXISTS idx_segments_record ON segments(record_id, created_at
 > 沿用临时文件并在转写后删除、不入库。主界面底栏提供「打开录音目录」按钮，在系统文件管理器中
 > 打开当前记录最近一段音频所在目录；并提供可展开的「录音片段」面板，列出当前记录的各段录音
 > （时间/模式/时长/大小/文本），支持**回放**（系统默认播放器）、**重新转写**（离线后端，结果追加正文并回填该段文本）、**单段删除**（删文件+删行）。
+
+> 📝 **外部音频导入（M14，§4.2.3）**：除录音外，用户可从文件系统导入已有音频（wav/mp3）为
+> 当前记录的一段。导入采用**复制并保留原格式**——把源文件原样复制到 `{音频根}/{record_id}/{时戳}_{短id}.{ext}`
+> （扩展名随源文件），落 `segments` 行（`mode = "imported"`，`text` 为空待转写），**不自动转写**
+> （用户按需用片段面板的「重新转写」触发）。复制语义保证文件归 VoxInk 所有：过期清理/孤儿对账/
+> 级联删除均与录音片段一致，绝不触碰用户的原始文件。孤儿对账与回放需识别 `.wav` 与 `.mp3` 两种扩展名。
 
 ---
 
@@ -615,6 +636,21 @@ Microphone ──[PCM]──▶ Audio Capture ──[f32]──▶ Ring Buffer
        `save_audio=false` 时改为删除临时 WAV。两种模式（实时/离线）同此归档逻辑。
 - **上传进度**：大文件上传显示进度条。
 - **超时处理**：HTTP 请求超时 120 秒（可配置），超时后提示"转写超时，请检查网络或缩短录音时长"。
+
+#### 4.2.3 外部音频导入 (Import，M14)
+
+用户可能已有外部录制的音频文件，希望直接导入并转写，而非现场录音。
+
+- **入口**：「录音片段」面板提供「导入音频」按钮（首版位置；可后续调整）。当前无打开的记录时，先自动新建一条记录再导入。
+- **选择**：弹出系统文件选择对话框，过滤 **wav / mp3** 两种格式（首版范围）。
+- **存储**：采用**复制并保留原格式**——把源文件原样复制到 `{音频根}/{record_id}/{时戳}_{短id}.{ext}`（扩展名随源文件）。
+  - 复制后文件归 VoxInk 所有，生命周期（过期清理 / 孤儿对账 / 删记录级联删 / 单段删除）与录音片段完全一致，**绝不触碰用户的原始文件**。
+- **入库**：落 `segments` 行，`mode = "imported"`，`text` 为空；`byte_size` 取文件大小，`duration_secs` 由解析得到
+  （wav 读 header；mp3 用 `symphonia` 纯 Rust 探测时长）。
+- **转写**：**不自动转写**。导入后片段以"未转写"态出现在片段面板，用户按需点「重新转写」（复用离线后端链路 §4.2.2），结果追加正文并回填该段文本。
+- **后端格式适配**：离线后端按 `AudioFormat`（§2.2 `OfflineAudio`）设上传 MIME/扩展名（wav→`audio/wav`、mp3→`audio/mpeg`），不再写死 WAV。
+- **限制与提示**：沿用各离线后端既有上限（如 `aliyun_bailian_offline` 同步接口 ~7MB 字节上限）；导入文件触发转写超限时给友好提示（建议改用自建/大文件后端）。
+- **回放**：片段回放需支持 mp3（`rodio` 启用 `mp3` 特性，纯 Rust，基于 symphonia）。
 
 ### 4.3 文本编辑与交互
 
@@ -873,6 +909,7 @@ ASR 能力通过 trait 抽象实现后端可插拔，支持：
 | M11 | 设置面板完善            | 3-4 天 | 完整设置 UI + 主题切换             | M5     |
 | M12 | 测试、打包与发布          | 5-8 天 | CI/CD + 安装包 + 文档           | M1, M2, M3, M4, M5, M6, M7, M9, M10, M11 |
 | M13 | 版本检查与自动更新         | 2-3 天 | GitHub Releases 检查 + 自替换升级 + 发布 workflow | M11 |
+| M14 | 外部音频导入            | 2-3 天 | 导入 wav/mp3 为录音片段（复制保留原格式）+ 手动转写复用离线链路 | M10, M11 |
 
 > 📝 **M8（本地 ASR 集成 qwen-asr）方案已取消**（2026-06，经调研：`qwen-asr` 默认需 BLAS 链接，与"纯 Rust 无 C 工具链"原则及 Windows 构建冲突）。里程碑编号 **M8 保留空缺**，M9–M12 不重新编号。本应用仅保留云端 ASR 后端。
 
@@ -1421,6 +1458,57 @@ cargo test
 
 #### 关键文件
 `src/update.rs` · `src/main.rs` · `src/config.rs` · `src/settings.rs`（或「关于」UI 所在）· `src/app.rs` · `.github/workflows/release.yml` · `Cargo.toml`
+
+---
+
+### 🎯 Milestone 14: 外部音频导入
+
+**工期**：2-3 天 | **优先级**：P2 | **依赖**：M10, M11
+
+> 📐 行为见 [§4.2.3 外部音频导入](#423-外部音频导入-importm14)；ASR 契约改动见 [§2.2](#22-asr-后端契约--srcasrtraitsrs) 的 `OfflineAudio`/`AudioFormat`；片段 schema 见 [§2.8](#28-历史数据库-schema-契约--srchistorydbrs)。
+
+> 📝 **决策（2026-06-23，经用户确认）**：① 存储用**复制并保留原格式**（非转码、非仅关联），避免过期清理误删用户原始文件、规避悬空路径；② 首版格式 **wav + mp3**；③ 导入后**不自动转写**，由用户手动触发；④ 允许并采用 **trait 契约改动**（`transcribe_offline` 携带 `OfflineAudio`），以最合理架构承载多格式，而非在后端内嗅探字节。
+
+#### 🤖 Agent 任务清单
+
+**任务 14.1: ASR 契约改造（`src/asr/traits.rs` + 三离线后端）**
+- 新增 `OfflineAudio { data, format }` 与 `AudioFormat { Wav, Mp3 }`（含 `mime()`/`extension()`/`from_path()` 派生方法）。
+- `transcribe_offline` 签名由 `Vec<u8>` 改为 `OfflineAudio`。
+- `aliyun_bailian_offline`（data-url MIME）、`qwen3_asr_selfhosted`（multipart 文件名/MIME）、`aliyun_bailian_filetrans`（OSS 对象后缀/content-type）改为按 `format` 取值，不再写死 wav。
+
+**任务 14.2: 依赖（`Cargo.toml`）**
+- 新增 `symphonia`（纯 Rust，仅启用 mp3 解码做时长探测）。
+- `rodio` 增加 `mp3` 特性（纯 Rust，基于 symphonia），使片段回放支持 mp3。
+
+**任务 14.3: 导入逻辑（`src/audio/` + `src/app.rs`）**
+- 时长探测：wav 用 hound 读 header；mp3 用 symphonia。
+- 文件选择对话框（gpui）过滤 wav/mp3 → 复制到 `{音频根}/{record_id}/{时戳}_{短id}.{ext}` → `add_segment(mode="imported")` → 刷新片段面板。无当前记录时先建记录。
+- `run_offline_transcription` 按文件扩展名构造 `OfflineAudio`（重转写/导入后转写共用）。
+
+**任务 14.4: 清理与回放适配（`src/app.rs`）**
+- 启动孤儿对账由只认 `.wav` 扩为 `.wav | .mp3`。
+- 片段「模式」标签新增 `imported` 的展示文案与圆点态。
+
+**任务 14.5: UI 入口（`src/app.rs` 片段面板）**
+- 「录音片段」面板新增「导入音频」按钮，走 14.3 流程。
+
+#### 🛑 Agent 检查点
+```bash
+cargo check
+cargo clippy -- -D warnings
+cargo test
+```
+
+#### 验收标准
+- [ ] 能从文件对话框选 wav / mp3 导入为当前记录的一段，源文件被**复制**进 recordings（原文件不动）
+- [ ] 导入后片段以"未转写"态出现，**不**自动转写；点「重新转写」可成功转写并回填文本
+- [ ] mp3 片段可在面板内回放；时长显示正确
+- [ ] 删记录/删片段/过期清理能正确删除导入的 mp3 文件，且永不删用户原始文件
+- [ ] 三个离线后端对 mp3 使用正确 MIME（mp3→`audio/mpeg`）
+- [ ] 门禁三连全绿
+
+#### 关键文件
+`src/asr/traits.rs` · `src/asr/backends/*.rs` · `src/audio/` · `src/app.rs` · `src/history/db.rs`（如需）· `Cargo.toml`
 
 ---
 

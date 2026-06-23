@@ -16,7 +16,7 @@ use serde::Deserialize;
 use crate::asr::client::build_http_client;
 use crate::asr::config::AsrConfig;
 use crate::asr::error::AsrError;
-use crate::asr::traits::{AsrBackend, StreamingResult};
+use crate::asr::traits::{AsrBackend, OfflineAudio, StreamingResult};
 
 const DEFAULT_ENDPOINT: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 const MODEL: &str = "qwen3-asr-flash";
@@ -105,15 +105,16 @@ impl AsrBackend for BailianOfflineBackend {
     async fn transcribe_offline(
         &self,
         config: &AsrConfig,
-        audio_data: Vec<u8>,
+        audio: OfflineAudio,
     ) -> Result<String, AsrError> {
-        if audio_data.is_empty() {
+        let OfflineAudio { data, format } = audio;
+        if data.is_empty() {
             return Err(AsrError::EmptyAudio);
         }
-        if audio_data.len() > MAX_AUDIO_BYTES {
+        if data.len() > MAX_AUDIO_BYTES {
             return Err(AsrError::UnsupportedFormat(format!(
-                "音频过大（约 {} MB）。离线同步识别上限约 10MB（约 3-4 分钟），请缩短录音时长",
-                audio_data.len() / 1024 / 1024
+                "音频过大（约 {} MB）。离线同步识别上限约 10MB（约 3-4 分钟），请缩短录音/选择更小的文件",
+                data.len() / 1024 / 1024
             )));
         }
 
@@ -130,7 +131,7 @@ impl AsrBackend for BailianOfflineBackend {
             DEFAULT_ENDPOINT
         };
 
-        let data_url = format!("data:audio/wav;base64,{}", BASE64.encode(&audio_data));
+        let data_url = format!("data:{};base64,{}", format.mime(), BASE64.encode(&data));
         let body = serde_json::json!({
             "model": MODEL,
             "messages": [{

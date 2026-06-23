@@ -17,7 +17,7 @@ use crate::asr::client::build_http_client;
 use crate::asr::config::AsrConfig;
 use crate::asr::error::AsrError;
 use crate::asr::oss::OssClient;
-use crate::asr::traits::{AsrBackend, StreamingResult};
+use crate::asr::traits::{AsrBackend, OfflineAudio, StreamingResult};
 
 const SUBMIT_URL: &str = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription";
 const TASK_URL_PREFIX: &str = "https://dashscope.aliyuncs.com/api/v1/tasks/";
@@ -83,9 +83,10 @@ impl AsrBackend for BailianFiletransBackend {
     async fn transcribe_offline(
         &self,
         config: &AsrConfig,
-        audio_data: Vec<u8>,
+        audio: OfflineAudio,
     ) -> Result<String, AsrError> {
-        if audio_data.is_empty() {
+        let OfflineAudio { data, format } = audio;
+        if data.is_empty() {
             return Err(AsrError::EmptyAudio);
         }
         let api_key = config.api_key.trim();
@@ -102,9 +103,13 @@ impl AsrBackend for BailianFiletransBackend {
             &config.oss_access_key_id,
             &config.oss_access_key_secret,
         );
-        let key = format!("voxink/{}.wav", Utc::now().format("%Y%m%d_%H%M%S_%6f"));
-        tracing::info!(%key, bytes = audio_data.len(), "filetrans：上传录音到 OSS");
-        oss.put_object(&key, "audio/wav", audio_data).await?;
+        let key = format!(
+            "voxink/{}.{}",
+            Utc::now().format("%Y%m%d_%H%M%S_%6f"),
+            format.extension()
+        );
+        tracing::info!(%key, bytes = data.len(), "filetrans：上传录音到 OSS");
+        oss.put_object(&key, format.mime(), data).await?;
 
         // 2) 预签名 GET URL 供 DashScope 拉取。
         let file_url = oss.presigned_get_url(&key, URL_EXPIRE_SECS);

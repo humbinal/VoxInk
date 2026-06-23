@@ -35,6 +35,17 @@ pub struct VoxInkConfig {
     pub window: WindowConfig,
     pub polish: PolishConfig,
     pub mini: MiniConfig,
+    pub update: UpdateConfig,
+}
+
+/// 自动更新状态（§2.7 的 `[update]` 段，M13）。非用户直改字段，由更新模块维护。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// 上次检查更新的 Unix 时间戳（秒）；0 = 从未检查。用于启动时每日节流。
+    pub last_check: i64,
+    /// 用户「跳过此版本」选择的版本号（如 "0.3.0"）；该版本不再弹启动提示。
+    pub skipped_version: String,
 }
 
 /// 迷你条窗口位置（物理像素，跨会话持久化）。`saved=false` 时用默认右上角。
@@ -57,6 +68,8 @@ pub struct GeneralConfig {
     pub start_minimized: bool,
     pub window_on_top: bool,
     pub audio_feedback: bool,
+    /// 启动时静默检查 GitHub 新版本（每日至多一次，见 [`UpdateConfig`]）。M13。
+    pub auto_check_update: bool,
 }
 
 /// 持久化的 ASR 设置（§2.7 的 `[asr]` 段）。
@@ -274,6 +287,7 @@ impl Default for VoxInkConfig {
             window: WindowConfig::default(),
             polish: PolishConfig::default(),
             mini: MiniConfig::default(),
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -310,6 +324,7 @@ impl Default for GeneralConfig {
             start_minimized: true,
             window_on_top: false,
             audio_feedback: true,
+            auto_check_update: true,
         }
     }
 }

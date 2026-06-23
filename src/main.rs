@@ -21,12 +21,16 @@ mod settings;
 mod state;
 mod theme;
 mod tray;
+mod update;
 
 use anyhow::Result;
-use app::{GlobalConfig, GlobalTokioHandle, VoxInk};
+use app::{GlobalConfig, GlobalTokioHandle, VoxInk, notify};
 use assets::VoxInkAssets;
 use config::VoxInkConfig;
-use gpui::{App, Bounds, Entity, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{
+    AnyWindowHandle, App, Bounds, Entity, WindowBounds, WindowHandle, WindowOptions, prelude::*,
+    px, size,
+};
 use gpui_component::{Root, TitleBar};
 use rolling_file::{RollingConditionBasic, RollingFileAppender};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -105,6 +109,9 @@ fn main() -> Result<()> {
     let tokio_handle = runtime.handle().clone();
 
     tracing::info!("VoxInk 启动中……");
+
+    // 清理上次自动更新残留的旧版本可执行文件（`*.old.exe`）；幂等、失败不阻塞启动（M13）。
+    update::cleanup_old_exe();
 
     // 启动时加载配置（不存在则用默认值；密文 API Key 自动解密为内存明文）。
     let config = VoxInkConfig::load();
@@ -213,6 +220,9 @@ fn main() -> Result<()> {
             }
         }
 
+        // 启动时静默检查更新（每日至多一次；有新版发 toast 提示，不打断操作）。M13。
+        spawn_startup_update_check(window, cx);
+
         // 启动最小化到托盘（首次运行仍显示主窗口，便于初次使用）。
         if config.general.start_minimized && !first_run {
             let _ = window.update(cx, |_, win, _| tray::hide_to_tray(win));
@@ -221,4 +231,62 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+/// 启动时静默检查更新（M13，§11.3）：
+/// 仅当 `general.auto_check_update` 且距 `update.last_check` ≥ 24h 时联网；
+/// 发现高于当前、且非用户「跳过」的版本时发 toast 提示。检查后写回 `last_check`。
+fn spawn_startup_update_check(window: WindowHandle<Root>, cx: &mut App) {
+    /// 启动检查节流：两次自动检查至少间隔 24 小时。
+    const CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
+
+    let Some(cfg) = cx.try_global::<GlobalConfig>().map(|g| g.0.clone()) else {
+        return;
+    };
+    if !cfg.general.auto_check_update {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+    if now.saturating_sub(cfg.update.last_check) < CHECK_INTERVAL_SECS {
+        return;
+    }
+    let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+        return;
+    };
+    let skipped = cfg.update.skipped_version.clone();
+    // 用 AnyWindowHandle 访问窗口：其 update 不租借 Root，闭包内 push_notification 才不触发
+    // 双重租借 panic（CLAUDE.md §3）。
+    let any_window: AnyWindowHandle = window.into();
+
+    cx.spawn(async move |cx| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle.spawn(async move {
+            let _ = tx.send(update::check_latest().await);
+        });
+        let Ok(result) = rx.await else { return };
+
+        // 无论结果如何都写回 last_check（避免反复失败时每次启动都联网）。
+        // AsyncApp::update 直接返回闭包值（单元），作为裸语句调用（CLAUDE.md §3）。
+        cx.update(|app| {
+            if let Some(g) = app.try_global::<GlobalConfig>() {
+                let mut c = g.0.clone();
+                c.update.last_check = now;
+                app.set_global(GlobalConfig(c));
+            }
+        });
+
+        match result {
+            Ok(latest) if latest.is_newer && latest.version != skipped => {
+                let msg = format!(
+                    "发现新版本 v{}，可在「设置 → 关于」中更新",
+                    latest.version
+                );
+                tracing::info!("{msg}");
+                let _ = any_window.update(cx, |_, win, app| notify(win, msg, app));
+            }
+            Ok(_) => tracing::info!("已是最新版本或用户已跳过该版本"),
+            Err(e) => tracing::warn!("启动检查更新失败: {e:#}"),
+        }
+    })
+    .detach();
 }

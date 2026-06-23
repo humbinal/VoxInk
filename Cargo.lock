@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "VoxInk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -36,6 +36,7 @@ dependencies = [
  "rubato",
  "rusqlite",
  "rust-i18n",
+ "semver",
  "serde",
  "serde_json",
  "sha1",
@@ -6224,12 +6225,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.7",
 ]

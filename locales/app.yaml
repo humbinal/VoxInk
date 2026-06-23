@@ -439,6 +439,36 @@ about.open_logs:
 about.license:
   zh-CN: 开源协议
   en: License
+about.check_update:
+  zh-CN: 检查更新
+  en: Check for updates
+about.checking:
+  zh-CN: 正在检查…
+  en: Checking…
+about.up_to_date:
+  zh-CN: 已是最新版本
+  en: Up to date
+about.new_version:
+  zh-CN: 发现新版本
+  en: New version
+about.update_now:
+  zh-CN: 立即更新
+  en: Update now
+about.skip_version:
+  zh-CN: 跳过此版本
+  en: Skip this version
+about.release_page:
+  zh-CN: 打开发布页
+  en: Open release page
+about.downloading:
+  zh-CN: 下载中
+  en: Downloading
+about.check_failed:
+  zh-CN: 检查失败
+  en: Check failed
+about.auto_check:
+  zh-CN: 启动时自动检查更新
+  en: Auto-check on startup
 
 # 通用提示
 settings.saved:

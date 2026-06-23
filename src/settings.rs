@@ -6,12 +6,15 @@
 //! ASR 区：**实时**与**离线**各有独立下拉选择后端实现，并各自配置 api_key / endpoint；
 //! 离线选「大文件」后端时额外显示 OSS 参数。下拉为自绘内联展开列表（避免浮层裁剪/复杂依赖）。
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use gpui::{
     ClickEvent, Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyDownEvent,
     ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::*, px, rgba,
 };
 use gpui_component::{
-    ActiveTheme, IconName, Sizable,
+    ActiveTheme, Disableable, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
@@ -25,6 +28,7 @@ use crate::asr::{AsrError, BackendRegistry};
 use crate::config::{ShortcutsConfig, VoxInkConfig};
 use crate::i18n::tr;
 use crate::state::TranscriptionMode;
+use crate::update;
 use crate::theme::{BRAND, DANGER, MODE_OFFLINE, MODE_STREAMING};
 
 const FILETRANS_ID: &str = "aliyun_bailian_filetrans";
@@ -53,6 +57,22 @@ enum Dropdown {
     None,
     Streaming,
     Offline,
+}
+
+/// 「关于」区更新检查/下载的 UI 状态（M13，§11.3）。
+enum UpdateStatus {
+    /// 未检查。
+    Idle,
+    /// 正在向 GitHub 查询最新版本。
+    Checking,
+    /// 已是最新版本（或用户已跳过该版本）。
+    UpToDate,
+    /// 发现可用新版本。
+    Available(crate::update::LatestRelease),
+    /// 正在下载并安装。
+    Downloading,
+    /// 检查或下载失败。
+    Failed(String),
 }
 
 /// 可改键的快捷键槽位（全局 + 应用内）。
@@ -198,6 +218,10 @@ pub struct SettingsView {
     capture_focus: FocusHandle,
     /// 正在捕获按键的槽位（Some 表示改键进行中，此时全局热键已被 suspend）。
     capturing: Option<ShortcutSlot>,
+    /// 「关于」区更新检查状态（M13）。
+    update_status: UpdateStatus,
+    /// 下载进度（0–100），由 tokio 下载任务写入、前台轮询展示。
+    update_progress: Arc<AtomicU8>,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -242,6 +266,8 @@ impl SettingsView {
             scroll: ScrollHandle::new(),
             capture_focus: cx.focus_handle(),
             capturing: None,
+            update_status: UpdateStatus::Idle,
+            update_progress: Arc::new(AtomicU8::new(0)),
         }
     }
 
@@ -603,6 +629,125 @@ impl SettingsView {
                 notify(window, "无法定位日志目录", cx);
             }
         }
+    }
+
+    /// 「检查更新」：向 GitHub 查询最新版本并更新「关于」区状态（M13，§11.3）。
+    fn on_check_update(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_status,
+            UpdateStatus::Checking | UpdateStatus::Downloading
+        ) {
+            return;
+        }
+        let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+            return;
+        };
+        self.update_status = UpdateStatus::Checking;
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            handle.spawn(async move {
+                let _ = tx.send(update::check_latest().await);
+            });
+            let outcome = rx.await;
+            let now = chrono::Utc::now().timestamp();
+            let _ = this.update_in(cx, |this, _w, cx| {
+                // 写回 last_check，与启动检查共用节流窗口。
+                this.update_config(cx, |c| c.update.last_check = now);
+                this.update_status = match outcome {
+                    // 手动检查即使等于「已跳过」版本也照常展示。
+                    Ok(Ok(latest)) if latest.is_newer => UpdateStatus::Available(latest),
+                    Ok(Ok(_)) => UpdateStatus::UpToDate,
+                    Ok(Err(e)) => UpdateStatus::Failed(format!("{e:#}")),
+                    Err(_) => UpdateStatus::Failed("检查已取消".to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 「立即更新」：下载并自替换，成功后启动新版并退出当前进程（M13，§11.3）。
+    fn on_do_update(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (exe_url, sha256_url) = match &self.update_status {
+            UpdateStatus::Available(rel) => (rel.exe_url.clone(), rel.sha256_url.clone()),
+            _ => return,
+        };
+        let Some(handle) = cx.try_global::<GlobalTokioHandle>().map(|g| g.0.clone()) else {
+            return;
+        };
+        self.update_progress.store(0, Ordering::Relaxed);
+        self.update_status = UpdateStatus::Downloading;
+        cx.notify();
+        let progress = self.update_progress.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            handle.spawn(async move {
+                let _ = tx.send(update::download_and_apply(exe_url, sha256_url, progress).await);
+            });
+            // 轮询：定时刷新进度条；下载任务完成后处理结果。
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                match rx.try_recv() {
+                    Ok(Ok(())) => {
+                        // 替换成功：启动新版进程，退出当前（on_app_quit 会保存配置）。
+                        match update::spawn_restart() {
+                            Ok(()) => {
+                                let _ = cx.update(|_w, app| app.quit());
+                            }
+                            Err(e) => {
+                                let msg = format!("{e:#}");
+                                let _ = this.update(cx, |this, cx| {
+                                    this.update_status = UpdateStatus::Failed(msg);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        let msg = format!("{e:#}");
+                        let _ = this.update(cx, |this, cx| {
+                            this.update_status = UpdateStatus::Failed(msg);
+                            cx.notify();
+                        });
+                        break;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                        // 仍在下载：刷新进度显示。
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.update_status = UpdateStatus::Failed("更新任务异常中断".to_string());
+                            cx.notify();
+                        });
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 「跳过此版本」：记录到配置，不再于启动时提示该版本（M13）。
+    fn on_skip_version(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let UpdateStatus::Available(rel) = &self.update_status {
+            let v = rel.version.clone();
+            self.update_config(cx, |c| c.update.skipped_version = v.clone());
+            notify(window, format!("已跳过版本 v{v}"), cx);
+            self.update_status = UpdateStatus::UpToDate;
+            cx.notify();
+        }
+    }
+
+    /// 「打开发布页」：在浏览器打开 GitHub Releases 页面（自更新不可用时的手动入口）。
+    fn on_open_release_page(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.open_url(&update::release_page_url());
     }
 
     /// 保存当前页配置：把输入框并入内存配置并落盘（停留在面板，给出反馈）。
@@ -1526,6 +1671,7 @@ impl Render for SettingsView {
                                     .on_click(cx.listener(Self::on_open_logs)),
                             ),
                     )
+                    .child(self.render_update_section(&cfg, cx))
             });
 
         // 面板尺寸跟随主窗：窗口越大面板越大，留出边距并设上下限。
@@ -1866,6 +2012,157 @@ impl SettingsView {
                     .child(tr(label_key)),
             )
             .child(div().child(value.to_string()))
+    }
+
+    /// 「关于」区更新检查/下载子区（M13，§11.3）。
+    fn render_update_section(
+        &self,
+        cfg: &VoxInkConfig,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let busy = matches!(
+            self.update_status,
+            UpdateStatus::Checking | UpdateStatus::Downloading
+        );
+
+        let mut col = v_flex()
+            .w_full()
+            .gap_2()
+            .pt_3()
+            .mt_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            // 顶部一行：检查按钮 + 简要状态文本。
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("check-update")
+                            .outline()
+                            .small()
+                            .label(tr("about.check_update"))
+                            .disabled(busy)
+                            .on_click(cx.listener(Self::on_check_update)),
+                    )
+                    .child(self.update_status_text(cx)),
+            );
+
+        match &self.update_status {
+            UpdateStatus::Available(rel) => {
+                if !rel.changelog.trim().is_empty() {
+                    col = col.child(
+                        div()
+                            .w_full()
+                            .max_h(px(160.))
+                            .overflow_hidden()
+                            .p_2()
+                            .rounded(px(6.))
+                            .bg(cx.theme().muted)
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rel.changelog.clone()),
+                    );
+                }
+                col = col.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("update-now")
+                                .primary()
+                                .small()
+                                .label(tr("about.update_now"))
+                                .on_click(cx.listener(Self::on_do_update)),
+                        )
+                        .child(
+                            Button::new("skip-version")
+                                .outline()
+                                .small()
+                                .label(tr("about.skip_version"))
+                                .on_click(cx.listener(Self::on_skip_version)),
+                        )
+                        .child(
+                            Button::new("release-page")
+                                .ghost()
+                                .small()
+                                .label(tr("about.release_page"))
+                                .on_click(cx.listener(Self::on_open_release_page)),
+                        ),
+                );
+            }
+            UpdateStatus::Downloading => {
+                let pct = self.update_progress.load(Ordering::Relaxed);
+                col = col.child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("{} {pct}%", tr("about.downloading"))),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(6.))
+                                .rounded(px(3.))
+                                .bg(cx.theme().muted)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .rounded(px(3.))
+                                        .bg(BRAND)
+                                        .w(gpui::relative(pct as f32 / 100.0)),
+                                ),
+                        ),
+                );
+            }
+            UpdateStatus::Failed(msg) => {
+                col = col.child(div().text_xs().text_color(DANGER).child(msg.clone())).child(
+                    Button::new("release-page-fail")
+                        .ghost()
+                        .small()
+                        .label(tr("about.release_page"))
+                        .on_click(cx.listener(Self::on_open_release_page)),
+                );
+            }
+            _ => {}
+        }
+
+        col.child(
+            self.labeled(
+                "about.auto_check",
+                Switch::new("auto-check")
+                    .checked(cfg.general.auto_check_update)
+                    .on_click(cx.listener(|this, checked: &bool, _w, cx| {
+                        let v = *checked;
+                        this.update_config(cx, |c| c.general.auto_check_update = v);
+                        cx.notify();
+                    })),
+            ),
+        )
+    }
+
+    /// 更新状态的简要文本（随状态变色）。
+    fn update_status_text(&self, cx: &Context<Self>) -> impl IntoElement {
+        let (text, danger) = match &self.update_status {
+            UpdateStatus::Idle | UpdateStatus::Downloading => (String::new(), false),
+            UpdateStatus::Checking => (tr("about.checking"), false),
+            UpdateStatus::UpToDate => (tr("about.up_to_date"), false),
+            UpdateStatus::Available(rel) => {
+                (format!("{} v{}", tr("about.new_version"), rel.version), false)
+            }
+            UpdateStatus::Failed(_) => (tr("about.check_failed"), true),
+        };
+        div()
+            .text_sm()
+            .text_color(if danger {
+                DANGER
+            } else {
+                cx.theme().muted_foreground
+            })
+            .child(text)
     }
 }
 

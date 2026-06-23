@@ -1,6 +1,6 @@
 [package]
 name = "VoxInk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [profile.release]
@@ -21,9 +21,13 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "macros"] }
 
 # ASR 网络层（§1.4，M4）。rustls-tls：纯 Rust TLS，跨平台无需 OpenSSL/C 工具链。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+# `stream` 启用 bytes_stream，用于自动更新下载进度（纯 Rust，依赖已有 futures-util）。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
 async-trait = "0.1"
 serde_json = "1"
+
+# 版本检查与自动更新（M13）。语义化版本比较，纯 Rust。
+semver = "1"
 
 # 实时流式 ASR（§1.4，M6）。WebSocket，rustls 纯 Rust TLS。
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }

@@ -1,0 +1,57 @@
+# 发布 workflow（M13，§11.3）：push 形如 vX.Y.Z 的 tag 时，构建 Windows release
+# 并把 VoxInk.exe + VoxInk.exe.sha256 作为产物发布到对应 GitHub Release。
+# 与 ci.yml（PR 门禁）互不替代。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # 创建 Release 需要写权限
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 校验 Cargo.toml 版本与 tag 一致（§11.2 版本号契约），不一致即失败，
+      # 防止 tag 与代码版本漂移。
+      - name: 校验版本号与 tag 一致
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $tagVer = $tag -replace '^v', ''
+          $line = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          $cargoVer = $line.Matches[0].Groups[1].Value
+          Write-Host "tag=$tag tagVer=$tagVer cargoVer=$cargoVer"
+          if ($tagVer -ne $cargoVer) {
+            Write-Error "tag 版本 ($tagVer) 与 Cargo.toml 版本 ($cargoVer) 不一致"
+            exit 1
+          }
+
+      - name: 构建 release
+        run: cargo build --release
+
+      - name: 生成 SHA256 校验文件
+        shell: pwsh
+        run: |
+          $exe = "target/release/VoxInk.exe"
+          $hash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$exe.sha256" -Value $hash -NoNewline
+          Write-Host "SHA256=$hash"
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # body 默认用 tag/自动生成；产物命名须与客户端 update.rs 约定一致（§11.3）。
+          files: |
+            target/release/VoxInk.exe
+            target/release/VoxInk.exe.sha256

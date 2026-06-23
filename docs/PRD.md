@@ -352,6 +352,12 @@ launch_at_startup = false
 start_minimized = true
 window_on_top = false
 audio_feedback = true
+auto_check_update = true      # 启动时静默检查 GitHub 新版本（每日至多一次，见 [update]）；M13
+
+# 自动更新状态（2026-06-23，M13）。非用户直改字段，由更新模块维护。
+[update]
+last_check = 0               # 上次检查更新的 Unix 时间戳（秒）；0=从未检查。用于每日节流
+skipped_version = ""         # 用户「跳过此版本」选择的版本号（如 "0.3.0"）；该版本不再弹提示
 
 # 2026-06-14 重构：实时/离线各自独立选择后端，且每个后端有独立配置。
 [asr]
@@ -784,7 +790,7 @@ Microphone ──[PCM]──▶ Audio Capture ──[f32]──▶ Ring Buffer
 4. **快捷键设置**：当前绑定显示（编辑 config.toml 后重启生效）。
 5. **数据**（2026-06-16）：保存录音音频开关、录音存储位置（浏览/打开，改路径仅对新录音生效）、
    音频保留天数、占用空间显示 + 清理过期音频、导出全部历史。
-6. **关于**：版本号、构建时间、Git 提交、导出诊断。
+6. **关于**：版本号、构建时间、Git 提交、导出诊断、**检查更新**（手动触发 + 显示最新版本/更新说明/「立即更新」/「跳过此版本」，见 §11.3、M13）、「启动时自动检查更新」开关。
 
 ---
 
@@ -866,6 +872,7 @@ ASR 能力通过 trait 抽象实现后端可插拔，支持：
 | M10 | 文本历史与会话           | 4-6 天 | SQLite 存储 + 历史面板           | M2     |
 | M11 | 设置面板完善            | 3-4 天 | 完整设置 UI + 主题切换             | M5     |
 | M12 | 测试、打包与发布          | 5-8 天 | CI/CD + 安装包 + 文档           | M1, M2, M3, M4, M5, M6, M7, M9, M10, M11 |
+| M13 | 版本检查与自动更新         | 2-3 天 | GitHub Releases 检查 + 自替换升级 + 发布 workflow | M11 |
 
 > 📝 **M8（本地 ASR 集成 qwen-asr）方案已取消**（2026-06，经调研：`qwen-asr` 默认需 BLAS 链接，与"纯 Rust 无 C 工具链"原则及 Windows 构建冲突）。里程碑编号 **M8 保留空缺**，M9–M12 不重新编号。本应用仅保留云端 ASR 后端。
 
@@ -1366,6 +1373,57 @@ ffprobe <生成的 wav 文件>
 
 ---
 
+### 🎯 Milestone 13: 版本检查与自动更新（GitHub Releases）
+
+**工期**：2-3 天 | **优先级**：P1 | **依赖**：M11
+
+> 📐 端点、tag 约定、产物命名、自替换流程、安全限制以 [§11.3 自动更新机制](#113-自动更新机制m132026-06-23) 为权威契约；版本号契约见 [§11.2](#112-版本管理)；新增配置字段见 [§2.7](#27-持久化配置-schema-契约)。
+
+#### 🤖 Agent 任务清单
+
+**任务 13.1: 发布 workflow（`.github/workflows/release.yml`）**
+- 触发：push tag `v*`。
+- 环境：`windows-latest`，`cargo build --release`。
+- 校验：构建后断言 `Cargo.toml` version 与 tag（去 `v`）一致，不一致则 fail（防 tag 与代码版本漂移）。
+- 产物：用 `softprops/action-gh-release`（或 `gh release create`）把 `target/release/VoxInk.exe` 与生成的 `VoxInk.exe.sha256` 上传到对应 Release；Release body 用 tag 或 `CHANGELOG.md` 片段。
+- 注：本 workflow 独立于 M12 的 `ci.yml`（PR 门禁），互不替代。
+
+**任务 13.2: 更新模块（`src/update.rs`）**
+- `check_latest()`：reqwest（rustls，带 §11.3 请求头）拉 latest release → 解析 `tag_name`/`body`/`assets` → 用 `semver` 与 `diagnostics::VERSION` 比较 → 返回 `UpdateInfo { version, changelog, exe_url, sha256_url }` 或「已是最新」。在 `GlobalTokioHandle` 上 spawn，oneshot 回前台（CLAUDE.md §1 执行器约定）。
+- `download_and_apply()`：下载 exe + `.sha256` → 校验哈希（`sha2`）→ 三步改名自替换 → spawn 新进程 + 退出（流程见 §11.3）。失败分类返回（网络 / 校验 / 文件系统），前台 toast 提示，绝不留下半替换状态。
+- `cleanup_old_exe()`：删同目录残留 `VoxInk.old.exe`，幂等、吞错。
+- 唯一新增依赖：`semver`（纯 Rust）。
+
+**任务 13.3: 启动集成（`src/main.rs`）**
+- 启动早期调 `cleanup_old_exe()`（紧邻 `cleanup_audio_on_startup`）。
+- 若 `general.auto_check_update` 且距 `update.last_check` ≥ 24h：后台静默检查；有新版且 `tag != skipped_version` 发 toast（点击进设置「关于」）。检查后写回 `last_check`。
+
+**任务 13.4: 设置面板「关于」区 UI（M11 的「关于」分类内扩展）**
+- 显示当前版本；「检查更新」按钮（手动、无视节流）。
+- 有新版：展示版本号 + `body` 更新说明 + 下载进度 + 「立即更新」「跳过此版本」（后者写 `update.skipped_version`）。
+- 「启动时自动检查更新」开关绑定 `general.auto_check_update`。
+- 走现有 spawn+toast+oneshot 模式，不触碰 GPUI 双重借用高危路径（CLAUDE.md §3）。
+
+#### 🛑 Agent 检查点
+```bash
+cargo check
+cargo clippy -- -D warnings
+cargo test
+```
+
+#### 验收标准
+- [ ] push tag `vX.Y.Z` 后 CI 自动产出含 `VoxInk.exe` + `.sha256` 的 Release
+- [ ] 「检查更新」能正确识别有/无新版并展示更新说明
+- [ ] 自替换升级后重启为新版本，旧 exe 在下次启动被清理
+- [ ] SHA256 不符时中止更新且不破坏当前 exe
+- [ ] `auto_check_update=false` 时启动不联网；每日节流生效
+- [ ] 门禁三连全绿
+
+#### 关键文件
+`src/update.rs` · `src/main.rs` · `src/config.rs` · `src/settings.rs`（或「关于」UI 所在）· `src/app.rs` · `.github/workflows/release.yml` · `Cargo.toml`
+
+---
+
 ## 10. 测试策略
 
 ### 10.1 测试金字塔
@@ -1414,6 +1472,39 @@ ffprobe <生成的 wav 文件>
 - **MAJOR**：架构大改或不兼容的 API 变更
 - **MINOR**：新功能（如新增 ASR 后端）
 - **PATCH**：Bug 修复、性能优化
+
+**版本号契约（M13，2026-06-23）**：唯一真源是 `Cargo.toml` 的 `version`（运行期 `env!("CARGO_PKG_VERSION")`，见 `src/diagnostics.rs::VERSION`）。GitHub Release 的 **git tag 必须为 `vMAJOR.MINOR.PATCH`**（带 `v` 前缀），其去掉 `v` 后须与该提交的 `Cargo.toml` version **逐字相等**。发布流程：改 `Cargo.toml` version → 提交 → 打 tag `vX.Y.Z` → push tag → CI 自动构建发布（§11.3）。
+
+### 11.3 自动更新机制（M13，2026-06-23）
+
+> 🟦 本节定义的端点、tag 约定、产物命名、自替换流程为跨版本**契约**（客户端与 CI 双方依赖），变更须先改本节。
+
+**分发形态**：单文件 `VoxInk.exe`（便携，无安装器），运行于用户可写目录。
+
+**版本来源（GitHub Releases API）**：
+- 端点：`GET https://api.github.com/repos/humbinal/VoxInk/releases/latest`
+- 必带请求头：`User-Agent: VoxInk/<version>`、`Accept: application/vnd.github+json`（缺 UA → GitHub 返回 403）。匿名调用，60 次/小时配额对更新检查足够。
+- 取用字段：`tag_name`（版本，去 `v` 前缀后与本地 `VERSION` 做 **semver** 比较）、`body`（更新说明，展示用）、`assets[]`（下载产物，按 `name` 匹配）。
+
+**发布产物（CI 上传至 Release，命名固定，客户端按名查找）**：
+- `VoxInk.exe` —— 主程序。
+- `VoxInk.exe.sha256` —— 上者的 SHA256 十六进制摘要（小写，纯哈希字符串）。
+
+**更新检查时机**：
+- 启动时静默检查：仅当 `general.auto_check_update=true` 且距 `update.last_check` ≥ 24h；有新版且 `tag != update.skipped_version` 时发 toast 通知，不打断操作。检查后写回 `update.last_check`。
+- 手动检查：设置面板「关于」区按钮，无视节流，结果直接展示。
+
+**自替换流程（Windows，纯 `std::fs`，运行中 exe 不可覆盖但可改名）**：
+1. 下载 `VoxInk.exe` 到当前 exe 同目录临时文件（如 `VoxInk.new.exe`）。
+2. 计算其 SHA256（复用已有 `sha2`），与下载的 `.sha256` 比对；**不符立即中止并删临时文件**。
+3. `rename(当前exe → VoxInk.old.exe)` → `rename(VoxInk.new.exe → 当前exe)`。
+4. `Command::new(当前exe).spawn()` 启新进程，当前进程退出。
+5. **下次启动**删除残留 `VoxInk.old.exe`（在 `cleanup_audio_on_startup` 旁新增 `cleanup_old_exe`，幂等、失败不阻塞启动）。
+
+**安全/已知限制**：
+- 无代码签名 → 首次下载/运行触发 Windows SmartScreen「未知发布者」警告，自更新无法消除（后续可购代码签名证书或接受）。
+- 完整性仅 SHA256（防传输损坏，HTTPS 防中间人）；不含发布物签名验证（防 Release 被篡改属后续增强）。
+- 仅 Windows 实现自替换；其它平台 M13 暂只做「检查 + 提示去 Release 页下载」（VoxInk 当前 Windows 优先）。
 
 ---
 

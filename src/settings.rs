@@ -636,6 +636,11 @@ impl SettingsView {
         cx.open_url(&update::repo_url());
     }
 
+    /// 「手动下载」：打开 Releases 列表页（在线检查更新受网络限制时的兜底）。
+    fn on_open_releases(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.open_url(&update::releases_url());
+    }
+
     /// 「检查更新」：向 GitHub 查询最新版本并更新「关于」区状态（M13，§11.3）。
     fn on_check_update(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
@@ -1673,9 +1678,13 @@ impl Render for SettingsView {
                                     .child(tr("about.repo")),
                             )
                             .child(
-                                Button::new("github-link")
-                                    .link()
-                                    .label("github.com/humbinal/VoxInk")
+                                // 可点击链接：用与其它行一致的正文字号（不用 Button::link，那会偏大），
+                                // 显示完整 https 地址。
+                                div()
+                                    .id("github-link")
+                                    .cursor_pointer()
+                                    .text_color(cx.theme().link)
+                                    .child(crate::update::repo_url())
                                     .on_click(cx.listener(Self::on_open_github)),
                             ),
                     )
@@ -2156,6 +2165,29 @@ impl SettingsView {
             }
             _ => {}
         }
+
+        // 手动下载兜底：部分用户因网络问题无法在线检查/更新，始终给出 Releases 地址。
+        col = col.child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .pt_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr("about.manual_download_hint")),
+                )
+                .child(
+                    div()
+                        .id("releases-link")
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(cx.theme().link)
+                        .child(crate::update::releases_url())
+                        .on_click(cx.listener(Self::on_open_releases)),
+                ),
+        );
 
         col.child(
             self.labeled(

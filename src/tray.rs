@@ -90,10 +90,12 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
         menu.append(item)
             .map_err(|e| anyhow!("添加托盘菜单项失败: {e}"))
     };
+    // 分四组（组间以分隔线区隔）：① 打开主界面 + 显示迷你条；② 开始/停止录音；③ 设置；④ 退出。
     append(&open)?;
+    append(&mini)?;
     append(&PredefinedMenuItem::separator())?;
     append(&record)?;
-    append(&mini)?;
+    append(&PredefinedMenuItem::separator())?;
     append(&settings)?;
     append(&PredefinedMenuItem::separator())?;
     append(&quit)?;

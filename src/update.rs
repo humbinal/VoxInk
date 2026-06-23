@@ -67,6 +67,11 @@ pub fn repo_url() -> String {
     format!("https://github.com/{REPO}")
 }
 
+/// Releases 列表页 URL（网络受限无法在线更新时供用户手动下载任意版本）。
+pub fn releases_url() -> String {
+    format!("https://github.com/{REPO}/releases")
+}
+
 /// 构建带 GitHub 必需 `User-Agent` 的 HTTP 客户端（缺 UA → GitHub 返回 403）。
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()

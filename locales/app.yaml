@@ -478,6 +478,9 @@ about.check_failed:
 about.auto_check:
   zh-CN: 启动时自动检查更新
   en: Auto-check on startup
+about.manual_download_hint:
+  zh-CN: 无法在线检查更新？可手动下载最新版本：
+  en: "Can't check for updates online? Download the latest version manually:"
 
 # 通用提示
 settings.saved:

@@ -108,6 +108,9 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_System_Com",
     "Win32_Graphics_Gdi",
+    # 单实例限制：命名互斥量 CreateMutexW（System_Threading）+ 其 SECURITY_ATTRIBUTES 形参（Security）。
+    "Win32_System_Threading",
+    "Win32_Security",
 ] }
 # 从 gpui Window 取 HWND。
 raw-window-handle = "0.6"

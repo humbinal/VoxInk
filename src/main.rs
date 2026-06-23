@@ -18,6 +18,7 @@ mod i18n;
 mod mini;
 mod polish;
 mod settings;
+mod single_instance;
 mod state;
 mod theme;
 mod tray;
@@ -98,6 +99,14 @@ fn init_tracing() -> Option<WorkerGuard> {
 fn main() -> Result<()> {
     // guard 须持有至 main 结束，否则非阻塞日志 worker 的缓冲会在退出时丢失。
     let _log_guard = init_tracing();
+
+    // 单实例限制（§4.5.4）：已有实例时唤起其窗口并退出本进程——须在创建 runtime / 加载配置 /
+    // 打开数据库之前，这些都会争抢 config.toml / history.db / 自动更新等共享状态。
+    // guard 持有至 main 结束（进程退出由 OS 释放命名互斥量）。
+    let _instance = match single_instance::acquire() {
+        Some(guard) => guard,
+        None => return Ok(()),
+    };
 
     // 创建 Tokio 多线程运行时，供音频 I/O、网络等耗时任务调度。
     let runtime = tokio::runtime::Builder::new_multi_thread()

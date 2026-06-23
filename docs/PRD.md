@@ -730,7 +730,18 @@ Microphone ──[PCM]──▶ Audio Capture ──[f32]──▶ Ring Buffer
 - **关闭按钮（X）**：隐藏到托盘，不退出应用（自绘关闭按钮 → HTCLOSE → WM_CLOSE → 仍走隐藏到托盘逻辑）。
 - **最小化**：最小化到任务栏，保留托盘图标。
 - **窗口置顶**（可选）。
-- **窗口记忆**：记住上次位置和大小，下次启动恢复。
+- **窗口记忆**：记住上次大小，下次启动恢复（位置仍居中）。
+
+#### 4.5.4 单实例限制（Windows）
+
+- 同一登录会话内只允许运行一个 VoxInk 实例，避免多实例争抢共享状态（config.toml 互相覆盖落盘、
+  history.db 并发写与重复启动清理、自动更新自替换冲突、全局热键/托盘重复）。
+- **实现**：`main()` 最早期用命名互斥量 `CreateMutexW("Local\\VoxInk_SingleInstance")` 检测；
+  互斥量句柄持有至进程退出（由 OS 释放，崩溃不残留）。
+- **第二个实例行为**：发现已有实例（`ERROR_ALREADY_EXISTS`）时，`FindWindowW` 定位已有实例主窗口
+  （标题 `"VoxInk"`，隐藏到托盘也可找到），`ShowWindow(SW_SHOW)` + `SetForegroundWindow` 将其唤到前台，
+  随后本进程立即退出（不触碰 db/config/更新）。
+- 非 Windows 平台暂不限制（项目 Windows 优先）。
 
 ---
 

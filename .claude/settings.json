@@ -12,12 +12,14 @@
       "Bash(pwd *)",
       "Bash(mkdir *)",
       "Bash(touch *)",
-      "Bash(git *)",
-      "Bash(npm *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git add*)",
       "Bash(cargo *)",
       "Bash(rustc *)",
-      "Bash(rustup *)",
-      "PowerShell(*)"
+      "Bash(rustup *)"
     ],
     "ask": [
       "PowerShell(Remove-Item *)",

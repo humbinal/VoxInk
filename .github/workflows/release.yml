@@ -16,8 +16,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # 需要 tag 注释信息作为发布说明
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -50,10 +48,26 @@ jobs:
           Set-Content -Path "$exe.sha256" -Value $hash -NoNewline
           Write-Host "SHA256=$hash"
 
-      # 用带注释 tag 的消息作为发布说明（git tag -a vX.Y.Z -m "..."）。
+      # 发布说明取自带注释 tag 的消息（git tag -a vX.Y.Z -m "..."）。
+      # 经 GitHub API 读取 tag 对象的 message——actions/checkout 不可靠保留注释，
+      # 直接 git tag --format='%(contents)' 会回退成提交说明，故走 API。
       - name: 提取 tag 注释作为发布说明
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: git tag -l --format='%(contents)' "${{ github.ref_name }}" > RELEASE_BODY.md
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          obj_type=$(gh api "repos/${{ github.repository }}/git/ref/tags/${tag}" --jq '.object.type')
+          obj_sha=$(gh api "repos/${{ github.repository }}/git/ref/tags/${tag}" --jq '.object.sha')
+          if [ "$obj_type" = "tag" ]; then
+            gh api "repos/${{ github.repository }}/git/tags/${obj_sha}" --jq '.message' > RELEASE_BODY.md
+          else
+            # 轻量 tag：回退到提交说明。
+            gh api "repos/${{ github.repository }}/git/commits/${obj_sha}" --jq '.message' > RELEASE_BODY.md
+          fi
+          echo "----- RELEASE_BODY.md -----"
+          cat RELEASE_BODY.md
 
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2

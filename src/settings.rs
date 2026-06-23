@@ -631,6 +631,11 @@ impl SettingsView {
         }
     }
 
+    /// 「项目主页」：在系统默认浏览器打开 GitHub 仓库。
+    fn on_open_github(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.open_url(&update::repo_url());
+    }
+
     /// 「检查更新」：向 GitHub 查询最新版本并更新「关于」区状态（M13，§11.3）。
     fn on_check_update(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
@@ -1645,13 +1650,35 @@ impl Render for SettingsView {
             })
             // ── 关于 ──
             .when(self.active_tab == SettingsTab::About, |this| {
-                this.child(self.about_row("about.version", crate::diagnostics::VERSION, cx))
+                this.child(self.about_row(
+                    "about.version",
+                    &format!("v{}", crate::diagnostics::VERSION),
+                    cx,
+                ))
                     .child(self.about_row(
                         "about.build",
                         &crate::diagnostics::build_time_display(),
                         cx,
                     ))
                     .child(self.about_row("about.commit", crate::diagnostics::GIT_HASH, cx))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
+                            .py_0p5()
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(tr("about.repo")),
+                            )
+                            .child(
+                                Button::new("github-link")
+                                    .link()
+                                    .label("github.com/humbinal/VoxInk")
+                                    .on_click(cx.listener(Self::on_open_github)),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .pt_2()

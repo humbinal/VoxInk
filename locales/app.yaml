@@ -436,6 +436,9 @@ about.build:
 about.commit:
   zh-CN: Git 提交
   en: Git commit
+about.repo:
+  zh-CN: 项目主页
+  en: Project home
 about.export_diag:
   zh-CN: 导出诊断信息
   en: Export diagnostics

@@ -12,10 +12,11 @@ strip = true
 
 [dependencies]
 # GUI 渲染框架（§1.4）
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "runtime_shaders"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+# 必须与 gpui-component 锁定同一 zed rev，否则依赖图出现两份 gpui 导致类型不兼容（见 §3 读源码再写）。
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "7b3b5321f8d25d370f7f23e15c104c4a08431f16" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "7b3b5321f8d25d370f7f23e15c104c4a08431f16" }
 
 # 异步运行时（§1.4）
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "macros"] }

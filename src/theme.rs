@@ -7,7 +7,7 @@
 //! 所以品牌覆盖必须在其之后再应用一次；主题切换时同样要重新叠加（见 [`apply`]）。
 
 use gpui::{App, Hsla, Window};
-use gpui_component::{Theme, ThemeMode};
+use gpui_component::{Theme, ThemeMode, ThemeTokens};
 
 /// 由角度/百分比构造 Hsla（gpui 内部用 0..1 表示），便于按设计稿书写。
 const fn hsl(h: f32, s: f32, l: f32) -> Hsla {
@@ -145,6 +145,12 @@ fn apply_brand(cx: &mut App) {
         t.title_bar = hsl(184.0, 30.0, 98.0);
         t.title_bar_border = hsl(192.0, 22.0, 91.0);
     }
+
+    // 关键（gpui-component 7b3b532+）：组件渲染读取的是 `colors` 的已解析快照 `tokens`，
+    // 而非 `colors` 本身。`Theme::change` 只在其内部 `apply_config` 里重建 tokens，
+    // 我们在其之后覆盖 `colors`（DerefMut 到 ThemeColor），必须手动重建 tokens，
+    // 否则按钮/聚焦环等取到品牌覆盖前的基础底色（表现为按钮变黑）。
+    t.tokens = ThemeTokens::from(&t.colors);
 }
 
 /// 给定颜色叠加透明度。

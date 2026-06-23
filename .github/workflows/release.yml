@@ -16,6 +16,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要 tag 注释信息作为发布说明
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -48,10 +50,16 @@ jobs:
           Set-Content -Path "$exe.sha256" -Value $hash -NoNewline
           Write-Host "SHA256=$hash"
 
+      # 用带注释 tag 的消息作为发布说明（git tag -a vX.Y.Z -m "..."）。
+      - name: 提取 tag 注释作为发布说明
+        shell: bash
+        run: git tag -l --format='%(contents)' "${{ github.ref_name }}" > RELEASE_BODY.md
+
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # body 默认用 tag/自动生成；产物命名须与客户端 update.rs 约定一致（§11.3）。
+          # body 取自 tag 注释；产物命名须与客户端 update.rs 约定一致（§11.3）。
+          body_path: RELEASE_BODY.md
           files: |
             target/release/VoxInk.exe
             target/release/VoxInk.exe.sha256

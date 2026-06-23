@@ -47,6 +47,13 @@ use crate::polish::{self, PolishRequest};
 use crate::settings::{SettingsEvent, SettingsView};
 use crate::state::{AppState, RecordingState, TranscriptionMode};
 
+/// 用户最近一次主动唤起的窗口形态：主窗口或迷你条。托盘单击据此切换对应形态。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WindowMode {
+    Main,
+    Mini,
+}
+
 /// 以全局形式承载持久化配置，便于跨 View 读写、退出时统一保存。
 pub struct GlobalConfig(pub VoxInkConfig);
 
@@ -152,6 +159,9 @@ pub struct VoxInk {
     mini_window: Option<WindowHandle<Root>>,
     /// 迷你条当前是否可见（与主窗口互斥：见 [`Self::toggle_mini_bar`]）。
     mini_visible: bool,
+    /// 用户最近一次主动打开的窗口形态（主窗口 / 迷你条），决定托盘单击唤起谁。
+    /// 仅内存态，应用退出不持久化（重启回到默认主窗口）。
+    last_window_mode: WindowMode,
     /// 当前应用内回放会话（None 表示未在播放）。
     playback: Option<Playback>,
     /// 回放轮询代际（仅最新一次轮询循环生效，避免重复播放叠加多个循环）。
@@ -312,6 +322,7 @@ impl VoxInk {
             segment_scroll: ScrollHandle::new(),
             mini_window: None,
             mini_visible: false,
+            last_window_mode: WindowMode::Main,
             playback: None,
             playback_gen: 0,
             autosave_gen: 0,
@@ -1330,6 +1341,7 @@ impl VoxInk {
     /// 首帧会 read 主视图，若在主视图 update 内进行会触发"read while being updated"panic。
     fn show_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mini_visible = true;
+        self.last_window_mode = WindowMode::Mini;
         let saved = self.saved_mini_pos(cx);
         if let Some(handle) = self.mini_window {
             cx.defer(move |cx| {
@@ -1414,6 +1426,7 @@ impl VoxInk {
 
     /// 显示主窗口并置前，同时隐藏迷你条（互斥）。供托盘/快捷键/迷你条"主窗口"按钮调用。
     pub fn show_main_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.last_window_mode = WindowMode::Main;
         crate::tray::show_to_front(window);
         self.set_mini_visible(false, cx);
     }
@@ -1424,6 +1437,15 @@ impl VoxInk {
             crate::tray::hide_to_tray(window);
         } else {
             self.show_main_window(window, cx);
+        }
+    }
+
+    /// 托盘单击入口：切换「最近一次主动唤起的窗口形态」——上次用主窗口就切主窗口，
+    /// 上次用迷你条就切迷你条（形态本身不持久化，重启回到默认主窗口）。
+    pub fn toggle_active_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.last_window_mode {
+            WindowMode::Main => self.toggle_main_window(window, cx),
+            WindowMode::Mini => self.toggle_mini_bar(window, cx),
         }
     }
 

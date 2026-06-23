@@ -8,28 +8,82 @@
 //! ⚠️ 平台说明（§12.3）：gpui 在 Windows 上不公开 hide/minimize，故隐藏/显示窗口直接调用
 //! Win32 `ShowWindow`（经 HWND）。非 Windows 平台暂为降级实现（不隐藏），后续里程碑再补。
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use gpui::{App, Entity, Window, WindowHandle};
 use gpui_component::Root;
 
-use crate::app::VoxInk;
+use crate::app::{GlobalConfig, VoxInk};
+use crate::config::ShortcutsConfig;
 
-/// 持有托盘实例使其在应用生命周期内存活（拖放会导致图标消失）。
-pub struct GlobalTray(#[allow(dead_code)] pub tray_icon::TrayIcon);
+/// 持有托盘实例使其在应用生命周期内存活（拖放会导致图标消失），并保留与全局快捷键
+/// 关联的菜单项句柄，供 [`sync_menu_shortcuts`] 在改键后刷新右侧的快捷键标注。
+/// `MenuItem` 内部 Rc 共享，存克隆即可继续操作已挂入菜单的同一项。
+pub struct GlobalTray {
+    #[allow(dead_code)]
+    tray: tray_icon::TrayIcon,
+    open: tray_icon::menu::MenuItem,
+    record: tray_icon::menu::MenuItem,
+    mini: tray_icon::menu::MenuItem,
+}
 
 impl gpui::Global for GlobalTray {}
+
+/// 把配置中的快捷键字符串解析为可在菜单右侧展示的 accelerator。纯展示：托盘弹出菜单不安装
+/// accel 表（应用未调 `TranslateAccelerator`），故不会真正触发，仅借 `\t` 右对齐显示。
+/// 空串或无法解析（如不受支持的键）时返回 None（即不显示标注）。
+fn parse_accel(spec: &str) -> Option<tray_icon::menu::accelerator::Accelerator> {
+    let s = spec.trim();
+    if s.is_empty() {
+        return None;
+    }
+    tray_icon::menu::accelerator::Accelerator::from_str(s).ok()
+}
+
+/// 按当前配置刷新托盘菜单项右侧的快捷键标注（设置面板改键后调用即时生效）。
+/// 托盘未初始化（如测试）时为 no-op。
+pub fn sync_menu_shortcuts(shortcuts: &ShortcutsConfig, cx: &App) {
+    if let Some(g) = cx.try_global::<GlobalTray>() {
+        let _ = g
+            .open
+            .set_accelerator(parse_accel(&shortcuts.toggle_window));
+        let _ = g
+            .record
+            .set_accelerator(parse_accel(&shortcuts.toggle_recording));
+        let _ = g
+            .mini
+            .set_accelerator(parse_accel(&shortcuts.toggle_mini_bar));
+    }
+}
 
 /// 创建托盘图标与菜单，注册关闭拦截，并启动事件轮询。
 pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App) -> Result<()> {
     use tray_icon::TrayIconBuilder;
     use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 
+    // 初始 accelerator 直接取当前配置；后续改键由 hotkey::apply_shortcuts → sync_menu_shortcuts 刷新。
+    let shortcuts = cx
+        .try_global::<GlobalConfig>()
+        .map(|g| g.0.shortcuts.clone());
+    let accel =
+        |pick: fn(&ShortcutsConfig) -> &str| shortcuts.as_ref().and_then(|s| parse_accel(pick(s)));
+
     let menu = Menu::new();
-    let open = MenuItem::with_id("open", "打开主界面", true, None);
-    let record = MenuItem::with_id("record", "开始/停止录音", true, None);
-    let mini = MenuItem::with_id("mini", "显示/隐藏迷你条", true, None);
+    let open = MenuItem::with_id("open", "打开主界面", true, accel(|s| &s.toggle_window));
+    let record = MenuItem::with_id(
+        "record",
+        "开始/停止录音",
+        true,
+        accel(|s| &s.toggle_recording),
+    );
+    let mini = MenuItem::with_id(
+        "mini",
+        "显示/隐藏迷你条",
+        true,
+        accel(|s| &s.toggle_mini_bar),
+    );
     let settings = MenuItem::with_id("settings", "设置", true, None);
     let quit = MenuItem::with_id("quit", "退出", true, None);
     let append = |item: &dyn tray_icon::menu::IsMenuItem| -> Result<()> {
@@ -56,7 +110,12 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
     let tray = builder
         .build()
         .map_err(|e| anyhow!("创建系统托盘失败: {e}"))?;
-    cx.set_global(GlobalTray(tray));
+    cx.set_global(GlobalTray {
+        tray,
+        open,
+        record,
+        mini,
+    });
 
     // 关闭按钮（X）→ 隐藏到托盘，取消真正的关闭。
     let _ = window.update(cx, |_, win, ctx| {
@@ -90,9 +149,12 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                 }
                 // 迷你条可见时：自适应宽度 + 记录位置（持久化）。
                 view.update(app, |v, vcx| v.tick_mini(vcx));
+                // 主窗口尺寸随用户拖拽变化时记录到配置，退出时统一落盘（位置仍不记录，启动居中）。
+                let _ = window.update(app, |_, win, cx| capture_main_size(win, cx));
             });
 
-            // 左键单击：切换主窗口显隐（显示则隐藏迷你条，互斥）。经 view 统一协调。
+            // 左键单击：切换「最近一次主动唤起的窗口形态」（主窗口或迷你条，二者互斥）。
+            // 经 view 统一协调；具体唤起谁取决于用户上次打开的是主窗口还是迷你条。
             while let Ok(event) = TrayIconEvent::receiver().try_recv() {
                 if let TrayIconEvent::Click {
                     button: MouseButton::Left,
@@ -102,7 +164,7 @@ pub fn setup_tray(window: WindowHandle<Root>, view: Entity<VoxInk>, cx: &mut App
                 {
                     let any_window = *window;
                     let _ = any_window.update(cx, |_, win, app| {
-                        view.update(app, |view, vcx| view.toggle_main_window(win, vcx));
+                        view.update(app, |view, vcx| view.toggle_active_window(win, vcx));
                     });
                 }
             }
@@ -183,6 +245,29 @@ pub fn is_window_visible(window: &Window) -> bool {
     }
 }
 
+/// 记录主窗口当前尺寸到配置（供退出时统一持久化、下次启动还原）。
+/// 仅在「普通窗口」态（非最大化/全屏）且可见时记录——否则会把最大化/全屏尺寸误存为还原尺寸，
+/// 或在隐藏到托盘时覆盖成无意义值。位置不记录（启动仍居中，见 `main.rs`）。
+fn capture_main_size(win: &Window, app: &mut App) {
+    if !is_window_visible(win) || win.is_maximized() || win.is_fullscreen() {
+        return;
+    }
+    let sz = win.bounds().size;
+    let w = f32::from(sz.width).round() as u32;
+    let h = f32::from(sz.height).round() as u32;
+    // 拒绝异常的过小尺寸（初始化中途或最小化竞态），避免覆盖成无意义值。
+    if w < 200 || h < 200 {
+        return;
+    }
+    if let Some(g) = app.try_global::<GlobalConfig>()
+        && (g.0.window.width != w || g.0.window.height != h)
+    {
+        let wc = &mut app.global_mut::<GlobalConfig>().0.window;
+        wc.width = w;
+        wc.height = h;
+    }
+}
+
 /// 设置/清除任务栏按钮右下角的状态角标（ITaskbarList3，Win32-only）。
 fn set_taskbar_overlay(hwnd: isize, status: crate::branding::IconStatus) {
     #[cfg(windows)]
@@ -198,7 +283,7 @@ pub fn set_tray_status(status: crate::branding::IconStatus, cx: &App) {
     if let Some(g) = cx.try_global::<GlobalTray>()
         && let Some(icon) = crate::branding::tray_icon(status)
     {
-        let _ = g.0.set_icon(Some(icon));
+        let _ = g.tray.set_icon(Some(icon));
     }
 }
 

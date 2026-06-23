@@ -187,6 +187,8 @@ pub fn apply_shortcuts(shortcuts: &ShortcutsConfig, cx: &mut App) -> Vec<String>
             }
         }
     }
+    // 同步托盘菜单右侧的快捷键标注（改键即时生效；托盘未初始化时为 no-op）。
+    crate::tray::sync_menu_shortcuts(shortcuts, cx);
     conflicts
 }
 

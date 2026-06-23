@@ -91,12 +91,11 @@ mod tests {
     }
 }
 
-/// 导出诊断到配置目录，返回文件路径。
+/// 导出诊断到本地数据目录（与日志同处 `%LOCALAPPDATA%\VoxInk`），返回文件路径。
 pub fn export(config: &VoxInkConfig) -> Result<PathBuf> {
-    let dir = VoxInkConfig::config_path()?
-        .parent()
-        .map(|p| p.to_path_buf())
-        .context("无法定位配置目录")?;
+    let dir = VoxInkConfig::data_dir()?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("创建数据目录失败: {}", dir.display()))?;
     let path = dir.join("voxink_diagnostics.txt");
     std::fs::write(&path, report(config))
         .with_context(|| format!("写入诊断文件失败: {}", path.display()))?;
